@@ -1,3 +1,4 @@
+from modules.market_analysis import market_status
 from __future__ import annotations
 
 import streamlit as st
@@ -65,7 +66,9 @@ c3.metric("중앙 사정률", fmt_pct(summary["median_rate"]))
 c4.metric("경쟁 강도", risk["competition_level"])
 c5.metric("리스크", risk["risk_level"])
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["전체 흐름", "기관별", "경쟁사", "추천 투찰률", "리스크"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+    ["전체 흐름", "기관별", "경쟁사", "추천 투찰률", "리스크", "시장구조"]
+)
 
 with tab1:
     st.subheader("월별 사정률 흐름")
@@ -152,3 +155,21 @@ with tab5:
         - 이상치 건수: **{risk['outlier_count']:,}건**
         """
     )
+
+with tab6:
+    st.subheader("시장구조 분석")
+
+    n_market = st.slider("최근 비교 구간", 10, 60, 30, key="market_n")
+
+    market = market_status(filtered, n=n_market)
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("시장 상태", market["market_status"])
+    m2.metric("최근 방향", market["trend"].get("direction", "판단불가"))
+    m3.metric("변동성", market["volatility"].get("volatility_status", "판단불가"))
+    m4.metric("경쟁 흐름", market["bidder"].get("bidder_status", "판단불가"))
+
+    st.info(market["comment"])
+
+    st.write("### 세부 지표")
+    st.json(market)
