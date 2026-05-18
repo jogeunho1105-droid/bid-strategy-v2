@@ -1,12 +1,14 @@
-def fmt_num(value, digits=0):
+def fmt_num(value):
     try:
-        return f"{float(value):,.{digits}f}"
+        return f"{int(value):,}"
     except Exception:
         return "-"
 
 
-def fmt_pct(value, digits=4):
+def fmt_pct(value):
     try:
-        return f"{float(value):.{digits}f}%"
+        if value is None or value != value:
+            return "-"
+        return f"{float(value):+.4f}%"
     except Exception:
         return "-"

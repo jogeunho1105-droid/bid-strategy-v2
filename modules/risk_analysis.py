@@ -3,31 +3,26 @@ from __future__ import annotations
 import pandas as pd
 
 
-def competition_level(avg_bidder_count: float | None) -> str:
-    if avg_bidder_count is None or pd.isna(avg_bidder_count):
-        return "판단불가"
-    if avg_bidder_count >= 80:
-        return "강"
-    if avg_bidder_count >= 30:
-        return "중"
-    return "약"
-
-
 def risk_summary(df: pd.DataFrame) -> dict:
-    rate_std = float(df["rate"].std()) if "rate" in df.columns and df["rate"].notna().any() else None
-    avg_bidders = float(df["bidder_count"].mean()) if "bidder_count" in df.columns and df["bidder_count"].notna().any() else None
-    outlier_count = int(df["rate_is_outlier"].sum()) if "rate_is_outlier" in df.columns else 0
-
-    risk = "낮음"
-    if rate_std and rate_std >= 0.35:
+    outlier_count = int(df.get("rate_is_outlier", pd.Series(False, index=df.index)).sum()) if len(df) else 0
+    avg_bid = df["bidder_count"].mean() if "bidder_count" in df.columns and not df.empty else None
+    std = df["rate"].std() if "rate" in df.columns and not df.empty else None
+    if avg_bid is None or avg_bid != avg_bid:
+        comp = "판단불가"
+    elif avg_bid >= 80:
+        comp = "매우강"
+    elif avg_bid >= 40:
+        comp = "강"
+    elif avg_bid >= 15:
+        comp = "중"
+    else:
+        comp = "낮음"
+    if std is None or std != std:
+        risk = "판단불가"
+    elif std >= 0.25:
         risk = "높음"
-    elif rate_std and rate_std >= 0.18:
-        risk = "중간"
-
-    return {
-        "rate_volatility": rate_std,
-        "avg_bidder_count": avg_bidders,
-        "competition_level": competition_level(avg_bidders),
-        "outlier_count": outlier_count,
-        "risk_level": risk,
-    }
+    elif std >= 0.12:
+        risk = "중"
+    else:
+        risk = "낮음"
+    return {"competition_level": comp, "risk_level": risk, "outlier_count": outlier_count, "avg_bidder_count": avg_bid, "std": std}
