@@ -6,7 +6,10 @@ import plotly.express as px
 from modules.data_loader import load_excel
 from modules.preprocess import clean_data, filtered_valid_rate
 from modules.basic_analysis import overview, group_rate_stats, monthly_trend
-from modules.institution_analysis import analyze_agency
+from modules.institution_analysis import (
+    analyze_agency,
+    agency_strategy_comment,
+)
 from modules.competitor_analysis import analyze_competitor, competitor_by_agency
 from modules.strategy_engine import recommend_rate
 from modules.risk_analysis import risk_summary
@@ -82,12 +85,28 @@ with tab2:
     st.subheader("기관별 사정률 통계")
     min_count = st.slider("최소 건수", 1, 30, 5, key="agency_min")
     agency_stats = analyze_agency(filtered, min_count=min_count)
-    st.dataframe(agency_stats, use_container_width=True)
 
     if not agency_stats.empty:
+        selected_agency_detail = st.selectbox(
+            "기관 상세 전략 코멘트",
+            agency_stats["agency"].tolist(),
+            key="agency_detail_comment",
+        )
+
+        selected_row = agency_stats[
+            agency_stats["agency"] == selected_agency_detail
+        ].iloc[0]
+
+        st.info(agency_strategy_comment(selected_row))
+
+        st.dataframe(agency_stats, use_container_width=True)
+
         top = agency_stats.head(20)
         fig = px.bar(top, x="agency", y="평균사정률", hover_data=["건수", "표준편차"])
         st.plotly_chart(fig, use_container_width=True)
+
+    else:
+        st.warning("기관별 분석을 위한 데이터가 부족합니다.")
 
 with tab3:
     st.subheader("경쟁사/낙찰업체 통계")
