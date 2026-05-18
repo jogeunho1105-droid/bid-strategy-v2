@@ -132,6 +132,12 @@ with tab4:
         r1.metric("안정형", fmt_pct(rec["stable"]))
         r2.metric("중립형", fmt_pct(rec["neutral"]))
         r3.metric("공격형", fmt_pct(rec["aggressive"]))
+        r4, r5, r6 = st.columns(3)
+        r4.metric("밀집도", f"{rec['density']:.1%}" if rec["density"] == rec["density"] else "-")
+        r5.metric("과열지수", rec["heat_score"] if rec["heat_score"] == rec["heat_score"] else "-")
+        r6.metric("실질 난이도", rec["difficulty"])
+
+        st.info(rec["comment"])
         st.write("분석 샘플 수:", rec["sample_count"])
         st.write("최근 변동성:", fmt_pct(rec["volatility"]))
         st.caption("1차 모델은 최근 데이터 가중평균 기반입니다. 향후 기관·업체수·경쟁사 보정 모델을 추가합니다.")
