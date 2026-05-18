@@ -1,4 +1,3 @@
-from modules.market_analysis import market_status
 from __future__ import annotations
 
 import streamlit as st
@@ -14,6 +13,7 @@ from modules.institution_analysis import (
 from modules.competitor_analysis import analyze_competitor, competitor_by_agency
 from modules.strategy_engine import recommend_rate
 from modules.risk_analysis import risk_summary
+from modules.market_analysis import market_status
 from utils.formatter import fmt_num, fmt_pct
 
 st.set_page_config(page_title="입찰전략 분석 시스템 v2", layout="wide")
