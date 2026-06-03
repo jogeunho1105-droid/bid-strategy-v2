@@ -12,6 +12,7 @@ import xlrd
 DATA_DIR = "data"
 HISTORY_FILE = os.path.join(DATA_DIR, "history.pkl")
 PATTERN_FILE = os.path.join(DATA_DIR, "pattern_stats.json")
+ROOT_PATTERN_FILE = "pattern_stats.json"
 
 THREE_PT = {
     "한국전력공사 경기본부": {"bias":"음수↓","detail":"음60%/중13%/양27%","pt_a":-0.40,"pt_c":+0.20,"cover":63,"cover_r":73,"note":"음수편향 강함"},
@@ -116,9 +117,14 @@ def save_history(df):
 
 
 def load_pattern_stats():
-    if os.path.exists(PATTERN_FILE):
-        with open(PATTERN_FILE, encoding="utf-8") as f:
-            return json.load(f)
+    source = PATTERN_FILE if os.path.exists(PATTERN_FILE) else ROOT_PATTERN_FILE
+    if os.path.exists(source):
+        with open(source, encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and isinstance(data.get("orgs"), dict):
+            return data["orgs"]
+        if isinstance(data, dict):
+            return data
     return {}
 
 

@@ -10,6 +10,7 @@ import streamlit as st
 from modules.basic_analysis import group_rate_stats, monthly_trend, overview
 from modules.bid_strategy_legacy import (
     analyze_bid_list,
+    is_kepco,
     load_history,
     load_pattern_stats,
     normalize_history,
@@ -37,6 +38,10 @@ st.markdown(
     .val-a{background:#fee2e2;color:#991b1b;border-radius:8px;padding:10px 15px;font-weight:bold;text-align:center}
     .val-b{background:#dbeafe;color:#1d4ed8;border-radius:8px;padding:10px 15px;font-weight:bold;text-align:center}
     .val-c{background:#dcfce7;color:#15803d;border-radius:8px;padding:10px 15px;font-weight:bold;text-align:center}
+    .status-ok{background:#dcfce7;color:#166534;padding:3px 8px;border-radius:999px;font-weight:700}
+    .status-warn{background:#fef3c7;color:#92400e;padding:3px 8px;border-radius:999px;font-weight:700}
+    .status-risk{background:#fee2e2;color:#991b1b;padding:3px 8px;border-radius:999px;font-weight:700}
+    .compact-note{background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px 12px}
     </style>
     """,
     unsafe_allow_html=True,
@@ -57,22 +62,73 @@ mode = st.sidebar.radio(
     ["📥 투찰전략 생성", "📊 낙찰데이터 분석", "🔧 데이터 관리"],
 )
 
+
+def _analysis_count(row):
+    return sum(1 for key in ["a1", "a2", "a3"] if row.get(key))
+
+
+def _quality_label(row):
+    b = row["bid"]
+    grade = row["a1"].get("grade", "?") if row.get("a1") else "?"
+    flags = []
+    if b["base"] <= 0:
+        flags.append("기초금액 확인")
+    if _analysis_count(row) < 2:
+        flags.append("분석값 부족")
+    if grade == "D":
+        flags.append("신뢰도 D")
+    if row["range_lo"] is None:
+        flags.append("권장구간 없음")
+    if "분산" in str(row["conv_lbl"]):
+        flags.append("분산큼")
+    if not flags:
+        return "정상"
+    return ", ".join(flags)
+
+
+def _priority_score(row):
+    grade = row["a1"].get("grade", "?") if row.get("a1") else "?"
+    score = 0
+    score += _analysis_count(row) * 2
+    score += {"A": 3, "B": 2, "C": 1, "D": -2}.get(grade, 0)
+    score += 2 if row.get("three_pt") else 0
+    score += 2 if row["range_lo"] is not None else -2
+    if "높음" in str(row["conv_lbl"]):
+        score += 2
+    if "분산" in str(row["conv_lbl"]):
+        score -= 2
+    if row["bid"]["base"] <= 0:
+        score -= 3
+    return score
+
+
+def _status_badge(label):
+    if label == "정상":
+        return '<span class="status-ok">정상</span>'
+    if "분산" in label or "신뢰도 D" in label or "분석값 부족" in label:
+        return f'<span class="status-risk">{label}</span>'
+    return f'<span class="status-warn">{label}</span>'
+
 # -----------------------------------------------------------------------------
 # 데이터 관리
 # -----------------------------------------------------------------------------
 if mode == "🔧 데이터 관리":
     st.header("🔧 데이터 관리")
     st.caption("낙찰이력 파일을 업로드하면 투찰전략 생성 모드에서 ①패턴/②유사표본/③트렌드 분석에 사용됩니다.")
+    st.info("Streamlit Cloud에서는 앱 재시작 시 업로드 저장 파일이 초기화될 수 있습니다. 중요한 낙찰이력과 pattern_stats.json은 GitHub 저장소나 별도 DB에 보관하는 방식이 가장 안정적입니다.")
 
     hist = load_history()
+    pattern_stats = load_pattern_stats()
     if hist is not None:
         valid = hist[hist["예가/기초(0%)"].notna() & (hist["예가/기초(0%)"].abs() < 10)]
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3, c4 = st.columns(4)
         c1.metric("현재 낙찰이력", f"{len(valid):,}건")
         c2.metric("발주기관", f"{valid['발주기관'].nunique() if '발주기관' in valid.columns else 0:,}개")
         c3.metric("평균 사정률", f"{valid['예가/기초(0%)'].mean():+.4f}%")
+        c4.metric("패턴통계", f"{len(pattern_stats):,}개")
     else:
         st.warning("현재 저장된 낙찰이력이 없습니다.")
+        st.metric("패턴통계", f"{len(pattern_stats):,}개")
 
     uploaded = st.file_uploader("낙찰데이터 엑셀 업로드", type=["xlsx", "xls"])
     if uploaded:
@@ -110,6 +166,11 @@ if mode == "📥 투찰전략 생성":
         c3.metric("평균 사정률", f"{df_c['예가/기초(0%)'].mean():+.4f}%")
 
     pattern_stats = load_pattern_stats()
+    if pattern_stats:
+        st.caption(f"패턴통계 DB {len(pattern_stats):,}개 발주기관 연결됨")
+    elif df_c is None:
+        st.error("패턴통계와 낙찰이력이 모두 없어 전략 정확도가 크게 낮아집니다. 먼저 데이터 관리에서 낙찰데이터를 업로드하세요.")
+
     xls_file = st.file_uploader("나라장터 입찰서류함 xls/xlsx 업로드", type=["xls", "xlsx"])
 
     if not xls_file:
@@ -135,6 +196,7 @@ if mode == "📥 투찰전략 생성":
         lo, hi = row["range_lo"], row["range_hi"]
         grade = a1.get("grade", "?") if a1 else "?"
         tp_str = f"A:{tp['pt_a']:+.2f} B:{tp['pt_b']:+.4f} C:{tp['pt_c']:+.2f} ({tp['cover']}%)" if tp else "-"
+        quality = _quality_label(row)
         rows.append({
             "No": b["no"],
             "공고명": b["name"][:40] + "…" if len(b["name"]) > 40 else b["name"],
@@ -149,48 +211,94 @@ if mode == "📥 투찰전략 생성":
             "수렴도": row["conv_lbl"],
             "등급": grade,
             "3포인트": tp_str,
+            "확인필요": quality,
+            "우선점수": _priority_score(row),
         })
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    result_df = pd.DataFrame(rows).sort_values(["우선점수", "No"], ascending=[False, True])
 
-    st.subheader("건별 상세")
-    for row in results:
-        b = row["bid"]; a1 = row["a1"]; a2 = row["a2"]; a3 = row["a3"]; tp = row["three_pt"]
-        lo, hi = row["range_lo"], row["range_hi"]
-        with st.expander(f"No.{b['no']} {b['name']} | {b['org']} | {b['base_억']:.4f}억"):
-            c1, c2, c3, c4 = st.columns(4)
-            with c1:
-                v = f"{a1['pred']:+.4f}%" if a1 else "이력없음"
-                st.markdown(f'<div class="val-box val-pattern">①패턴<br>{v}</div>', unsafe_allow_html=True)
-                if a1: st.caption(f"n={a1['n']} | {a1['trend']} | {a1['pattern']} | 등급 {a1['grade']}")
-            with c2:
-                v = f"{a2['pred']:+.4f}%" if a2 else "이력없음"
-                st.markdown(f'<div class="val-box val-similar">②유사표본<br>{v}</div>', unsafe_allow_html=True)
-                if a2: st.caption(f"n={a2['n']} | 평균 {a2['mean']:+.4f}%")
-            with c3:
-                v = f"{a3['pred']:+.4f}%" if a3 else "이력없음"
-                st.markdown(f'<div class="val-box val-trend">③트렌드<br>{v}</div>', unsafe_allow_html=True)
-                if a3: st.caption(f"최근{a3['recent_n']}건 | drift {a3['drift']:+.4f}%")
-            with c4:
-                if lo is not None:
-                    st.markdown(f'<div class="val-box val-rec">권장구간<br>{lo:+.4f}%~{hi:+.4f}%</div>', unsafe_allow_html=True)
-                    if b["base"] > 0:
-                        st.caption(f"하한 {int(b['base']*(100+lo)/100):,}원")
-                        st.caption(f"상한 {int(b['base']*(100+hi)/100):,}원")
-                else:
-                    st.warning("데이터 부족")
-            if tp:
-                st.markdown("---")
-                st.write(f"3개 업체 분산투찰 전략: **{tp['bias']}** / {tp['detail']} / 커버율 {tp['cover']}%")
-                ca, cb, cc = st.columns(3)
-                with ca:
-                    amt = f"<br>{int(b['base']*(100+tp['pt_a'])/100):,}원" if b["base"] > 0 else ""
-                    st.markdown(f'<div class="val-a">업체A<br>{tp["pt_a"]:+.2f}%{amt}</div>', unsafe_allow_html=True)
-                with cb:
-                    amt = f"<br>{int(b['base']*(100+tp['pt_b'])/100):,}원" if b["base"] > 0 else ""
-                    st.markdown(f'<div class="val-b">업체B<br>{tp["pt_b"]:+.4f}%{amt}</div>', unsafe_allow_html=True)
-                with cc:
-                    amt = f"<br>{int(b['base']*(100+tp['pt_c'])/100):,}원" if b["base"] > 0 else ""
-                    st.markdown(f'<div class="val-c">업체C<br>{tp["pt_c"]:+.2f}%{amt}</div>', unsafe_allow_html=True)
+    ok_count = int((result_df["확인필요"] == "정상").sum()) if not result_df.empty else 0
+    risk_count = len(result_df) - ok_count
+    three_pt_count = sum(1 for row in results if row.get("three_pt"))
+    no_range_count = sum(1 for row in results if row["range_lo"] is None)
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("전략 대상", f"{len(results):,}건")
+    m2.metric("정상", f"{ok_count:,}건")
+    m3.metric("확인 필요", f"{risk_count:,}건")
+    m4.metric("3포인트 적용", f"{three_pt_count:,}건")
+    if no_range_count:
+        st.warning(f"권장구간이 없는 공고가 {no_range_count}건 있습니다. 기초금액, 발주기관, 낙찰이력 표본을 확인하세요.")
+
+    st.subheader("오늘 투찰 우선순위")
+    st.dataframe(
+        result_df.drop(columns=["우선점수"]),
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "공고명": st.column_config.TextColumn(width="large"),
+            "발주기관": st.column_config.TextColumn(width="medium"),
+            "3포인트": st.column_config.TextColumn(width="medium"),
+            "확인필요": st.column_config.TextColumn(width="medium"),
+        },
+    )
+
+    st.subheader("선택 공고 상세")
+    result_lookup = {row["bid"]["no"]: row for row in results}
+    detail_options = [
+        f"No.{row['bid']['no']} | {_quality_label(row)} | {row['bid']['name'][:48]}"
+        for row in sorted(results, key=_priority_score, reverse=True)
+    ]
+    selected_detail = st.selectbox("상세 확인 공고", detail_options)
+    selected_no = int(selected_detail.split("|", 1)[0].replace("No.", "").strip())
+    row = result_lookup[selected_no]
+    b = row["bid"]; a1 = row["a1"]; a2 = row["a2"]; a3 = row["a3"]; tp = row["three_pt"]
+    lo, hi = row["range_lo"], row["range_hi"]
+    st.markdown(
+        f"<div class='compact-note'><b>No.{b['no']} {b['name']}</b><br>"
+        f"{b['org']} | 기초 {b['base_억']:.4f}억 | 마감 {b['deadline']} | "
+        f"{_status_badge(_quality_label(row))}</div>",
+        unsafe_allow_html=True,
+    )
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        v = f"{a1['pred']:+.4f}%" if a1 else "이력없음"
+        st.markdown(f'<div class="val-box val-pattern">①패턴<br>{v}</div>', unsafe_allow_html=True)
+        if a1:
+            st.caption(f"n={a1['n']} | {a1['trend']} | {a1['pattern']} | 등급 {a1['grade']} | {a1.get('source','')}")
+    with c2:
+        v = f"{a2['pred']:+.4f}%" if a2 else "이력없음"
+        st.markdown(f'<div class="val-box val-similar">②유사표본<br>{v}</div>', unsafe_allow_html=True)
+        if a2:
+            st.caption(f"n={a2['n']} | 평균 {a2['mean']:+.4f}%")
+            if a2.get("fallback"):
+                st.caption(f"대체표본: {a2.get('fallback_note','')}")
+    with c3:
+        v = f"{a3['pred']:+.4f}%" if a3 else "이력없음"
+        st.markdown(f'<div class="val-box val-trend">③트렌드<br>{v}</div>', unsafe_allow_html=True)
+        if a3:
+            st.caption(f"최근{a3['recent_n']}건 | drift {a3['drift']:+.4f}%")
+    with c4:
+        if lo is not None:
+            st.markdown(f'<div class="val-box val-rec">권장구간<br>{lo:+.4f}%~{hi:+.4f}%</div>', unsafe_allow_html=True)
+            if b["base"] > 0:
+                st.caption(f"하한 {int(b['base']*(100+lo)/100):,}원")
+                st.caption(f"상한 {int(b['base']*(100+hi)/100):,}원")
+        else:
+            st.warning("데이터 부족")
+    if tp:
+        st.markdown("---")
+        st.write(f"3개 업체 분산투찰 전략: **{tp['bias']}** / {tp['detail']} / 커버율 {tp['cover']}%")
+        ca, cb, cc = st.columns(3)
+        with ca:
+            amt = f"<br>{int(b['base']*(100+tp['pt_a'])/100):,}원" if b["base"] > 0 else ""
+            st.markdown(f'<div class="val-a">업체A<br>{tp["pt_a"]:+.2f}%{amt}</div>', unsafe_allow_html=True)
+        with cb:
+            amt = f"<br>{int(b['base']*(100+tp['pt_b'])/100):,}원" if b["base"] > 0 else ""
+            st.markdown(f'<div class="val-b">업체B<br>{tp["pt_b"]:+.4f}%{amt}</div>', unsafe_allow_html=True)
+        with cc:
+            amt = f"<br>{int(b['base']*(100+tp['pt_c'])/100):,}원" if b["base"] > 0 else ""
+            st.markdown(f'<div class="val-c">업체C<br>{tp["pt_c"]:+.2f}%{amt}</div>', unsafe_allow_html=True)
+    elif is_kepco(b["org"]):
+        st.warning("한전 공고이지만 3포인트 적용 조건에서 제외되었습니다. 수의/소액수의/전자견적 여부를 확인하세요.")
 
     excel_buf = make_strategy_excel(results)
     today_str = datetime.now().strftime("%Y%m%d")

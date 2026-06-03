@@ -121,5 +121,47 @@ def make_strategy_excel(results):
         ws2.row_dimensions[r].height=36
     ws2.freeze_panes="A3"
 
+    ws3=wb.create_sheet("피드백입력")
+    ws3.sheet_view.showGridLines=False
+    ws3.merge_cells("A1:O1")
+    t3=ws3["A1"]; t3.value="개찰 후 피드백 입력용 - 실제예가/낙찰여부/채택전략을 누적하면 다음 모델 개선에 사용"
+    t3.font=Font(name="맑은 고딕",bold=True,size=12,color="FF1a2744")
+    t3.fill=PatternFill("solid",start_color="FFe0e7ff")
+    t3.alignment=Alignment(horizontal="center",vertical="center")
+    ws3.row_dimensions[1].height=28
+    hdrs3=[
+        "전략일","No","공고번호","공고명","발주기관","기초금액","권장하한(%)","권장상한(%)",
+        "업체A(%)","업체B(%)","업체C(%)","채택전략","실제예가(%)","낙찰여부(O/X)","비고"
+    ]
+    wids3=[12,6,18,42,24,14,12,12,10,10,10,12,12,14,24]
+    for i,(h,w) in enumerate(zip(hdrs3,wids3),1):
+        H(ws3,2,i,h,wrap=True); ws3.column_dimensions[get_column_letter(i)].width=w
+    for i,row in enumerate(results):
+        r=i+3; bg=GRAY if r%2==0 else "FFFFFFFF"
+        b=row["bid"]; lo=row["range_lo"]; hi=row["range_hi"]; tp=row.get("three_pt")
+        C(ws3,r,1,today,bg=bg,center=True)
+        C(ws3,r,2,b["no"],bg=bg,center=True,bold=True)
+        C(ws3,r,3,b.get("bid_no",""),bg=bg,center=True,sz=9)
+        C(ws3,r,4,b["name"][:70],bg=bg,sz=9,wrap=True)
+        C(ws3,r,5,b["org"],bg=bg,sz=9,wrap=True)
+        if b["base"]>0:
+            cx=C(ws3,r,6,b["base"],bg=bg,right=True); cx.number_format="#,##0"
+        else:
+            C(ws3,r,6,"미정",bg=bg,center=True)
+        for ci,val in [(7,lo),(8,hi)]:
+            if val is not None:
+                cx=C(ws3,r,ci,val,bg=PURP,right=True,bold=True,color="FF7c3aed"); cx.number_format="+0.0000;-0.0000"
+            else:
+                C(ws3,r,ci,"-",bg=bg,center=True)
+        for ci,key in [(9,"pt_a"),(10,"pt_b"),(11,"pt_c")]:
+            if tp:
+                cx=C(ws3,r,ci,tp[key],bg=bg,right=True); cx.number_format="+0.0000;-0.0000"
+            else:
+                C(ws3,r,ci,"-",bg=bg,center=True)
+        for ci in range(12,16):
+            C(ws3,r,ci,"",bg="FFFFFFFF",center=True,wrap=True)
+        ws3.row_dimensions[r].height=34
+    ws3.freeze_panes="A3"
+
     buf=io.BytesIO(); wb.save(buf); buf.seek(0)
     return buf

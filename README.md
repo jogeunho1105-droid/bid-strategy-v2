@@ -19,9 +19,18 @@ streamlit run app.py
    - 권장 하한/상한
    - 한전 3포인트 분산투찰
    - 투찰전략 xlsx 다운로드
+   - 오늘 투찰 우선순위 / 확인 필요 공고 자동 표시
+   - 선택한 공고 1건 중심 상세 확인
+   - 다운로드 엑셀에 개찰 후 피드백 입력 시트 포함
 
 2. 낙찰데이터 분석
    - 기관별 패턴
    - 추천 사정률
    - 밀집도/과열지수
    - 시장구조 분석
+
+## 운영 메모
+
+- Streamlit Cloud 로컬 저장 파일은 앱 재시작 시 초기화될 수 있습니다.
+- 장기 운영 시 낙찰이력과 `pattern_stats.json`은 GitHub 저장소, Google Sheets, Supabase 등 외부 저장소에 보관하는 것을 권장합니다.
+- `pattern_stats.json`은 루트 또는 `data/pattern_stats.json`에 둘 수 있으며, `{"orgs": {...}}` 구조도 자동 인식합니다.
