@@ -20,6 +20,11 @@ from modules.bid_strategy_legacy import (
 from modules.competitor_analysis import analyze_competitor, competitor_by_agency
 from modules.data_loader import load_excel
 from modules.excel_exporter import make_strategy_excel
+from modules.google_sheets_db import (
+    append_strategy_results,
+    google_sheets_config_status,
+    load_google_sheets_reference,
+)
 from modules.institution_analysis import analyze_agency, agency_strategy_comment
 from modules.market_analysis import market_status
 from modules.preprocess import clean_data, cleaning_report, filtered_valid_rate
@@ -59,8 +64,58 @@ st.markdown(
 
 mode = st.sidebar.radio(
     "모드 선택",
-    ["📥 투찰전략 생성", "📊 낙찰데이터 분석", "🔧 데이터 관리"],
+    ["📥 투찰전략 생성", "📊 낙찰데이터 분석", "🔧 기준자료 관리"],
 )
+
+
+def _history_from_state_or_disk():
+    if "history_df" in st.session_state:
+        return st.session_state["history_df"]
+    hist = load_history()
+    if hist is not None:
+        st.session_state["history_df"] = hist
+    return hist
+
+
+def _store_history(df):
+    hist = normalize_history(df)
+    st.session_state["history_df"] = hist
+    save_history(hist)
+    return hist
+
+
+def _reference_from_remote_or_local(force_refresh=False):
+    remote_hist, remote_patterns, remote_status = load_google_sheets_reference(force_refresh=force_refresh)
+    st.session_state["remote_db_status"] = remote_status
+    if remote_hist is not None:
+        hist = normalize_history(remote_hist)
+        st.session_state["history_df"] = hist
+        st.session_state["remote_pattern_stats"] = remote_patterns
+        return hist, remote_patterns, remote_status
+
+    hist = _history_from_state_or_disk()
+    local_patterns = load_pattern_stats()
+    return hist, local_patterns, remote_status
+
+
+def _show_remote_status(status):
+    if status.get("connected"):
+        st.success(
+            f"Google Sheets DB 연결됨: 낙찰이력 {status.get('history_rows', 0):,}건, "
+            f"패턴 {status.get('pattern_count', 0):,}개"
+        )
+        st.caption(f"마지막 읽기: {status.get('loaded_at', '-')}")
+        return
+
+    if not status.get("configured"):
+        cfg = google_sheets_config_status()
+        st.info(
+            "Google Sheets 서비스계정이 아직 설정되지 않았습니다. "
+            "Streamlit Secrets에 서비스계정 정보를 넣으면 이 앱이 입찰전략_DB를 직접 읽습니다."
+        )
+        st.caption(f"대상 Spreadsheet ID: {cfg.get('spreadsheet_id')}")
+    else:
+        st.warning(f"Google Sheets DB 연결 실패: {status.get('error', '알 수 없는 오류')}")
 
 
 def _analysis_count(row):
@@ -110,15 +165,19 @@ def _status_badge(label):
     return f'<span class="status-warn">{label}</span>'
 
 # -----------------------------------------------------------------------------
-# 데이터 관리
+# 기준자료 관리
 # -----------------------------------------------------------------------------
-if mode == "🔧 데이터 관리":
-    st.header("🔧 데이터 관리")
-    st.caption("낙찰이력 파일을 업로드하면 투찰전략 생성 모드에서 ①패턴/②유사표본/③트렌드 분석에 사용됩니다.")
-    st.info("Streamlit Cloud에서는 앱 재시작 시 업로드 저장 파일이 초기화될 수 있습니다. 중요한 낙찰이력과 pattern_stats.json은 GitHub 저장소나 별도 DB에 보관하는 방식이 가장 안정적입니다.")
+if mode == "🔧 기준자료 관리":
+    st.header("🔧 기준자료 관리")
+    st.caption("투찰전략 생성에 사용할 낙찰이력 기준자료를 확인하고 교체하는 화면입니다.")
+    st.info("운영 기준자료는 Google Sheets의 입찰전략_DB를 우선 사용합니다. 연결되지 않으면 기존 업로드/로컬 캐시 방식으로 동작합니다.")
 
-    hist = load_history()
-    pattern_stats = load_pattern_stats()
+    if st.button("Google Sheets DB 다시 읽기", use_container_width=True):
+        hist, pattern_stats, remote_status = _reference_from_remote_or_local(force_refresh=True)
+    else:
+        hist, pattern_stats, remote_status = _reference_from_remote_or_local()
+    _show_remote_status(remote_status)
+
     if hist is not None:
         valid = hist[hist["예가/기초(0%)"].notna() & (hist["예가/기초(0%)"].abs() < 10)]
         c1, c2, c3, c4 = st.columns(4)
@@ -131,18 +190,18 @@ if mode == "🔧 데이터 관리":
         st.metric("패턴통계", f"{len(pattern_stats):,}개")
 
     uploaded = st.file_uploader("낙찰데이터 엑셀 업로드", type=["xlsx", "xls"])
+    st.caption("업로드는 임시/보조 기능입니다. 여러 PC 공용 운영자료는 Google Sheets의 1_낙찰이력을 갱신하세요.")
     if uploaded:
         try:
             df_new = pd.read_excel(uploaded)
-            df_new = normalize_history(df_new)
+            df_new = _store_history(df_new)
             required = ["발주기관", "공고명", "기초금액", "예가/기초(0%)"]
             missing = [c for c in required if c not in df_new.columns]
             if missing:
                 st.error(f"필수 컬럼이 없습니다: {missing}")
             else:
-                save_history(df_new)
                 df_v = df_new[df_new["예가/기초(0%)"].notna() & (df_new["예가/기초(0%)"].abs() < 10)]
-                st.success("낙찰이력 저장 완료")
+                st.success("기준자료 저장 완료. 이제 투찰전략 생성에서 이 데이터를 사용합니다.")
                 st.dataframe(df_v.head(20), use_container_width=True)
         except Exception as e:
             st.error(f"업로드 처리 오류: {e}")
@@ -154,9 +213,13 @@ if mode == "🔧 데이터 관리":
 if mode == "📥 투찰전략 생성":
     st.header("📥 입찰서류함 기반 투찰전략 생성")
 
-    hist = load_history()
+    refresh_db = st.sidebar.button("DB 새로고침")
+    hist, pattern_stats, remote_status = _reference_from_remote_or_local(force_refresh=refresh_db)
+    with st.sidebar.expander("DB 연결 상태", expanded=False):
+        _show_remote_status(remote_status)
+
     if hist is None:
-        st.warning("낙찰이력이 없습니다. 먼저 '데이터 관리'에서 낙찰데이터를 업로드하세요.")
+        st.warning("낙찰이력이 없습니다. 먼저 '낙찰데이터 분석' 또는 '기준자료 관리'에서 낙찰데이터를 업로드하세요.")
         df_c = None
     else:
         df_c = hist[hist["예가/기초(0%)"].notna() & (hist["예가/기초(0%)"].abs() < 10)].copy()
@@ -165,7 +228,6 @@ if mode == "📥 투찰전략 생성":
         c2.metric("발주기관", f"{df_c['발주기관'].nunique() if '발주기관' in df_c.columns else 0:,}개")
         c3.metric("평균 사정률", f"{df_c['예가/기초(0%)'].mean():+.4f}%")
 
-    pattern_stats = load_pattern_stats()
     if pattern_stats:
         st.caption(f"패턴통계 DB {len(pattern_stats):,}개 발주기관 연결됨")
     elif df_c is None:
@@ -310,19 +372,39 @@ if mode == "📥 투찰전략 생성":
         type="primary",
         use_container_width=True,
     )
+    if remote_status.get("connected"):
+        with st.expander("Google Sheets에 전략결과 저장", expanded=False):
+            created_by = st.text_input("저장자", value="", placeholder="예: 홍길동")
+            if st.button("4_전략결과에 저장", type="secondary", use_container_width=True):
+                try:
+                    saved = append_strategy_results(results, created_by=created_by.strip())
+                    st.success(f"Google Sheets 4_전략결과에 {saved.get('saved', 0):,}건 저장했습니다.")
+                except Exception as e:
+                    st.error(f"전략결과 저장 실패: {e}")
     st.stop()
 
 # -----------------------------------------------------------------------------
 # 낙찰데이터 분석
 # -----------------------------------------------------------------------------
 st.header("📊 낙찰데이터 분석")
-uploaded_file = st.sidebar.file_uploader("낙찰데이터 엑셀 업로드", type=["xlsx", "xls"])
+uploaded_file = st.sidebar.file_uploader("낙찰데이터 엑셀 업로드", type=["xlsx", "xls"], key="analysis_history_upload")
 
-if uploaded_file is None:
+if uploaded_file is not None:
+    raw_df = load_excel(uploaded_file)
+    st.session_state["analysis_raw_df"] = raw_df
+    st.session_state["analysis_file_name"] = uploaded_file.name
+    try:
+        _store_history(raw_df)
+        st.success("낙찰데이터를 분석자료와 투찰전략 기준자료로 보관했습니다.")
+    except Exception:
+        st.info("분석자료로 보관했습니다. 투찰전략 기준자료 저장은 컬럼 확인 후 가능합니다.")
+elif "analysis_raw_df" in st.session_state:
+    raw_df = st.session_state["analysis_raw_df"]
+    st.caption(f"현재 세션에 보관된 파일 사용 중: {st.session_state.get('analysis_file_name', '낙찰데이터')}")
+else:
     st.info("왼쪽 사이드바에서 낙찰데이터 엑셀 파일을 업로드하세요.")
     st.stop()
 
-raw_df = load_excel(uploaded_file)
 df, mapping = clean_data(raw_df)
 valid_df = filtered_valid_rate(df)
 
