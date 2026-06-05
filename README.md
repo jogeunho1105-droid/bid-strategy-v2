@@ -17,6 +17,8 @@
 1. Google Cloud에서 서비스계정을 만들고 Google Sheets API를 활성화합니다.
 2. 서비스계정 이메일에 `입찰전략_DB` 편집 권한을 부여합니다.
 3. Streamlit Cloud 앱의 `Settings > Secrets`에 `.streamlit/secrets.toml.example` 형식으로 값을 입력합니다.
+   - 추천: `[google_sheets] service_account_json = """..."""`에 Google Cloud JSON 파일 내용을 통째로 붙여 넣습니다.
+   - TOML 항목으로 나눠 넣을 경우 `private_key` 줄바꿈이 깨지면 `Unable to load PEM file` 오류가 납니다.
 4. `requirements.txt`에 포함된 `gspread`, `google-auth`가 설치되도록 배포합니다.
 
 ## 실행

@@ -53,11 +53,29 @@ def _get_service_account_info() -> tuple[dict[str, Any] | None, str]:
         except json.JSONDecodeError as exc:
             return None, f"GOOGLE_SERVICE_ACCOUNT_JSON 파싱 오류: {exc}"
 
+    raw_json_secret = ""
+    try:
+        raw_json_secret = str(st.secrets.get("gcp_service_account_json", "") or "").strip()
+    except Exception:
+        raw_json_secret = ""
+    if raw_json_secret:
+        try:
+            return json.loads(raw_json_secret), "st.secrets.gcp_service_account_json"
+        except json.JSONDecodeError as exc:
+            return None, f"st.secrets.gcp_service_account_json 파싱 오류: {exc}"
+
+    cfg = _get_secret_dict("google_sheets")
+    cfg_raw_json = str(cfg.get("service_account_json") or "").strip()
+    if cfg_raw_json:
+        try:
+            return json.loads(cfg_raw_json), "st.secrets.google_sheets.service_account_json"
+        except json.JSONDecodeError as exc:
+            return None, f"st.secrets.google_sheets.service_account_json 파싱 오류: {exc}"
+
     info = _get_secret_dict("gcp_service_account")
     if info:
         return info, "st.secrets.gcp_service_account"
 
-    cfg = _get_secret_dict("google_sheets")
     nested = cfg.get("service_account")
     if isinstance(nested, dict) and nested:
         return nested, "st.secrets.google_sheets.service_account"
