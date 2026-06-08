@@ -1,9 +1,0 @@
-streamlit
-pandas
-numpy
-plotly
-openpyxl
-xlrd
-xlsxwriter
-gspread
-google-auth
