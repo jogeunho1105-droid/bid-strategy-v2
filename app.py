@@ -191,25 +191,130 @@ def analyze_similar(name, base_원, df_c):
         "keywords":kws,"fallback":False
     }
 
-def analyze_trend(org, df_c):
-    """③ 트렌드 분석 — 최소값 보정 (±0.02% 미만 시 평균으로 보정)"""
-    if df_c is None: return None
-    sub=df_c[df_c["발주기관"]==org]
-    vals=sub["예가/기초(0%)"].values
-    if len(vals)<5: return None
-    rn=max(5,len(vals)//4); recent=vals[-rn:]; older=vals[:-rn]
-    rm=float(np.mean(recent)); om=float(np.mean(older)) if len(older)>0 else rm
-    drift=rm-om; r3=vals[-3:] if len(vals)>=3 else vals
-    co=sub["업체수"].tail(rn).mean() if "업체수" in sub.columns else None
-    raw_pred = rm+drift*0.3
-    # ── 최소값 보정: 예측값이 ±0.02% 미만으로 0에 수렴하면 전체평균으로 대체
-    if abs(raw_pred) < 0.02:
-        raw_pred = float(np.mean(vals))
+def _trend_field_filter(name):
+    if is_diag(name):
+        return "진단", DIAG_KWS
+    if is_supervision(name):
+        return "감리", ["감리"]
+    return "전체", []
+
+def _trend_scope_df(org, name, df_c):
+    if df_c is None:
+        return pd.DataFrame()
+    field_label, keywords = _trend_field_filter(name)
+    sub = df_c[df_c["발주기관"] == org].copy()
+    if keywords:
+        mask = pd.Series([False]*len(sub), index=sub.index)
+        for kw in keywords:
+            mask = mask | sub["공고명"].astype(str).str.contains(kw, na=False, regex=False)
+        sub = sub[mask].copy()
+    if len(sub) < 21 and keywords:
+        # 동일 발주처 분야 표본이 부족하면 같은 분야의 한전 전체 표본으로 확장한다.
+        sub = df_c[df_c["발주기관"].astype(str).str.contains("한국전력공사", na=False, regex=False)].copy()
+        mask = pd.Series([False]*len(sub), index=sub.index)
+        for kw in keywords:
+            mask = mask | sub["공고명"].astype(str).str.contains(kw, na=False, regex=False)
+        sub = sub[mask].copy()
+    if len(sub) < 21:
+        # 그래도 부족하면 동일 발주처 전체 표본으로 복귀한다.
+        sub = df_c[df_c["발주기관"] == org].copy()
+    if "개찰일" in sub.columns:
+        parsed = pd.to_datetime(sub["개찰일"].astype(str), errors="coerce")
+        short = parsed.isna() & sub["개찰일"].astype(str).str.match(r"^\d{2}\.\d{1,2}\.\d{1,2}$", na=False)
+        if short.any():
+            parsed.loc[short] = pd.to_datetime("20" + sub.loc[short, "개찰일"].astype(str), format="%Y.%m.%d", errors="coerce")
+        sub = sub.assign(_sort_date=parsed).sort_values(["_sort_date"], na_position="first")
+    return sub
+
+def _nearest_trend_prediction(vals, window=10, top_k=5):
+    vals = np.array([float(v) for v in vals if not pd.isna(v)], dtype=float)
+    if len(vals) < window + 2:
+        return None
+    target = vals[-window:]
+    candidates = []
+    # 마지막 target과 겹치지 않는 과거 window -> next 값만 후보로 사용한다.
+    for start in range(0, len(vals) - window):
+        end = start + window
+        if end >= len(vals) - 1:
+            break
+        seq = vals[start:end]
+        next_val = vals[end]
+        dist = float(np.mean(np.abs(seq - target)))
+        candidates.append((dist, start, next_val, seq))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: x[0])
+    best = candidates[:min(top_k, len(candidates))]
+    dists = np.array([b[0] for b in best], dtype=float)
+    next_vals = np.array([b[2] for b in best], dtype=float)
+    weights = 1 / (dists + 0.0001)
+    pred = float(np.average(next_vals, weights=weights))
+    spread = float(np.std(next_vals)) if len(next_vals) > 1 else 0.10
     return {
-        "pred":round(raw_pred,4),"recent_mean":round(rm,4),
-        "drift":round(drift,4),"recent_n":rn,
+        "pred": pred,
+        "lo": pred - max(0.05, spread * 0.5),
+        "hi": pred + max(0.05, spread * 0.5),
+        "matches": best,
+        "target": target,
+        "next_vals": next_vals,
+        "best_distance": float(best[0][0]),
+    }
+
+def analyze_trend(org, name, df_c):
+    """③ 트렌드: 직전 10개 흐름과 가장 유사한 과거 패턴의 다음 값을 기준으로 산정."""
+    if df_c is None: return None
+    field_label, _ = _trend_field_filter(name)
+    sub = _trend_scope_df(org, name, df_c)
+    vals = sub["예가/기초(0%)"].dropna().values if "예가/기초(0%)" in sub.columns else np.array([])
+    if len(vals) < 5: return None
+
+    match = _nearest_trend_prediction(vals, window=10, top_k=5)
+    rn = min(10, len(vals))
+    recent = vals[-rn:]
+    older = vals[:-rn]
+    rm = float(np.mean(recent))
+    om = float(np.mean(older)) if len(older)>0 else rm
+    drift = rm - om
+    r3 = vals[-3:] if len(vals)>=3 else vals
+
+    if match:
+        raw_pred = match["pred"]
+        lo2 = round(match["lo"], 2)
+        hi2 = round(match["hi"], 2)
+        if lo2 > hi2:
+            lo2, hi2 = hi2, lo2
+        method = "직전10 유사패턴"
+        matched_n = len(match["matches"])
+        best_distance = round(match["best_distance"], 4)
+        next_vals = [round(float(v), 4) for v in match["next_vals"]]
+    else:
+        raw_pred = rm + drift*0.3
+        if abs(raw_pred) < 0.02:
+            raw_pred = float(np.mean(vals))
+        lo2 = round(raw_pred - 0.10, 2)
+        hi2 = round(raw_pred + 0.10, 2)
+        method = "최근흐름 보정"
+        matched_n = 0
+        best_distance = None
+        next_vals = []
+
+    co = sub["업체수"].tail(rn).mean() if "업체수" in sub.columns else None
+    return {
+        "pred":round(float(raw_pred),4),
+        "recent_mean":round(rm,4),
+        "drift":round(drift,4),
+        "recent_n":rn,
         "recent3_mean":round(float(np.mean(r3)),4),
-        "avg_companies":round(float(co),1) if co and not np.isnan(float(co)) else None
+        "avg_companies":round(float(co),1) if co and not np.isnan(float(co)) else None,
+        "trend_lo":lo2,
+        "trend_hi":hi2,
+        "trend_range":f"{lo2:+.2f}%~{hi2:+.2f}%",
+        "method":method,
+        "matched_n":matched_n,
+        "best_distance":best_distance,
+        "next_vals":next_vals,
+        "field_label":field_label,
+        "scope_n":len(vals),
     }
 
 def recommend_range(a1,a2,a3):
@@ -619,7 +724,7 @@ def make_excel(results):
 
     wb=Workbook(); ws=wb.active; ws.title="투찰전략"; ws.sheet_view.showGridLines=False
     today=datetime.now().strftime("%Y.%m.%d")
-    ws.merge_cells("A1:J1"); t=ws["A1"]
+    ws.merge_cells("A1:K1"); t=ws["A1"]
     t.value=f"투찰전략 분석표 — {today}  ★ 패턴/유사표본/트렌드 종합"
     t.font=Font(name="맑은 고딕",bold=True,size=13,color="FF1a2744")
     t.fill=PatternFill("solid",start_color="FFe0e7ff")
@@ -627,8 +732,8 @@ def make_excel(results):
     ws.row_dimensions[1].height=30
 
     hdrs=["No","공고명","발주기관","기초금액(억)","마감",
-          "①패턴(%)","②유사표본(%)","③트렌드(%)","권장하한(%)","권장상한(%)"]
-    wids=[5,40,20,10,12,10,10,10,10,10]
+          "①패턴(%)","②유사표본(%)","③트렌드(%)","③권장구간","권장하한(%)","권장상한(%)"]
+    wids=[5,40,20,10,12,10,10,10,14,10,10]
     for i,(h,w) in enumerate(zip(hdrs,wids),1):
         H(ws,2,i,h,wrap=True); ws.column_dimensions[get_column_letter(i)].width=w
     ws.row_dimensions[2].height=36
@@ -650,7 +755,8 @@ def make_excel(results):
                       color="FF1d4ed8" if a["pred"]>=0 else "FF991b1b")
                 cx2.number_format="+0.0000;-0.0000"
             else: C(ws,r,ci,"이력없음",bg=RED_L,center=True,sz=8)
-        for ci,val in [(9,lo),(10,hi)]:
+        C(ws,r,9,a3.get("trend_range","-") if a3 else "-",bg=AMBER,center=True,bold=True,color="FF854d0e")
+        for ci,val in [(10,lo),(11,hi)]:
             if val is not None:
                 cx3=C(ws,r,ci,val,bg=PURP,right=True,bold=True,color="FF7c3aed")
                 cx3.number_format="+0.0000;-0.0000"
@@ -772,7 +878,7 @@ else:
     for i,b in enumerate(bids):
         a1=analyze_pattern(b["org"],df_c,pattern_stats)
         a2=analyze_similar(b["name"],b["base"],df_c)
-        a3=analyze_trend(b["org"],df_c)
+        a3=analyze_trend(b["org"],b["name"],df_c)
         lo,hi=recommend_range(a1,a2,a3)
         conv_std,conv_lbl=convergence_score(a1,a2,a3)
         amt_lbl,amt_adj,amt_note=get_amt_info(b["base_억"])
@@ -799,6 +905,7 @@ else:
             "①패턴":f"{a1['pred']:+.4f}%" if a1 else "없음",
             "②유사표본":f"{a2['pred']:+.4f}%" if a2 else "없음",
             "③트렌드":f"{a3['pred']:+.4f}%" if a3 else "없음",
+            "③권장":a3.get("trend_range","-") if a3 else "-",
             "💡하한":f"{lo:+.4f}%" if lo else "-",
             "💡상한":f"{hi:+.4f}%" if hi else "-",
             "수렴도":row["conv_lbl"],"등급":f"{ge}{grade}"})
@@ -853,8 +960,11 @@ else:
                 v=f"{a3['pred']:+.4f}%" if a3 else "이력없음"
                 st.markdown(f'<div class="val-box val-trend">③트렌드<br>{v}</div>',unsafe_allow_html=True)
                 if a3:
-                    st.caption(f"최근{a3['recent_n']}건평균:{a3['recent_mean']:+.4f}%")
-                    st.caption(f"drift:{a3['drift']:+.4f}% | 최근3건:{a3['recent3_mean']:+.4f}%")
+                    st.caption(f"{a3.get('method','트렌드')} | {a3.get('field_label','전체')} | 표본 {a3.get('scope_n',0)}건")
+                    st.caption(f"직전{a3['recent_n']}건 평균:{a3['recent_mean']:+.4f}% | 최근3건:{a3['recent3_mean']:+.4f}%")
+                    st.caption(f"다음 권장구간: {a3.get('trend_range','-')} | 유사패턴 {a3.get('matched_n',0)}개")
+                    if a3.get("best_distance") is not None:
+                        st.caption(f"최소거리 MAE:{a3['best_distance']:.4f} | 다음값 후보:{a3.get('next_vals',[])}")
             with c4:
                 if lo is not None:
                     st.markdown(f'<div class="val-box val-rec">💡권장구간<br>{lo:+.4f}%~{hi:+.4f}%</div>',unsafe_allow_html=True)
