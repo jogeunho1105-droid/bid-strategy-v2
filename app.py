@@ -1,10 +1,11 @@
 # ╔══════════════════════════════════════════════════════════════════╗
-# ║  투찰전략 분석 시스템 v2.5                                      ║
+# ║  투찰전략 분석 시스템 v2.6                                      ║
 # ║  개선: 패턴 범위 비교 강화                                     ║
 # ║  - ①패턴: 현재까지의 낙찰이력 차트 기반 분석                   ║
 # ║  - 한전 전체 / 동일 발주처 / 한전 감리·진단 / 동일 발주처 분야  ║
 # ║  - ③트렌드 최소값 보정 (±0.02% 미만 시 보정)                  ║
 # ║  - ②/③ 기준건수 3/5/10 설정 + 표본 충분 시 보조비교            ║
+# ║  - 선택값 변경 시 분석결과 캐시 재사용                          ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
 import streamlit as st
@@ -593,6 +594,7 @@ def selected_analysis(base, opt):
             out[k] = opt[k]
     return out
 
+@st.cache_data(show_spinner=False)
 def parse_xls(file_bytes, filename=""):
     """입찰서류함 파일 파싱 — xls/xlsx 모두 지원"""
     bids = []
@@ -653,6 +655,22 @@ def parse_xls(file_bytes, filename=""):
                 "region":   row.get("지역", ""),
             })
     return bids
+
+@st.cache_data(show_spinner=False)
+def compute_bid_results(bids, df_c, pattern_stats, similar_window, trend_window):
+    results=[]
+    for b in bids:
+        a1=analyze_pattern(b["org"],df_c,pattern_stats)
+        a2=analyze_similar(b["name"],b["base"],df_c,b.get("region",""),similar_window)
+        a3=analyze_trend(b["org"],b["name"],df_c,b.get("region",""),trend_window)
+        lo,hi=recommend_range(a1,a2,a3)
+        conv_std,conv_lbl=convergence_score(a1,a2,a3)
+        amt_lbl,amt_adj,amt_note=get_amt_info(b["base_억"])
+        results.append({"bid":b,"a1":a1,"a2":a2,"a3":a3,
+                        "range_lo":lo,"range_hi":hi,
+                        "conv_std":conv_std,"conv_lbl":conv_lbl,
+                        "amt_lbl":amt_lbl,"amt_adj":amt_adj,"amt_note":amt_note})
+    return results
 
 # ── 영문 변환 ─────────────────────────────────────────────────
 def tr_trend(t):
@@ -1041,7 +1059,7 @@ def make_excel(results):
     st.markdown("""
 <div class="main-header">
 <h2>📊 투찰전략 분석 시스템</h2>
-<p style="margin:0;opacity:0.8">자동추천 + 입찰자 선택형 전략표 | v2.5 | 낙찰이력 기반</p>
+<p style="margin:0;opacity:0.8">자동추천 + 입찰자 선택형 전략표 | v2.6 | 낙찰이력 기반</p>
 </div>""", unsafe_allow_html=True)
 
 with st.sidebar:
@@ -1159,21 +1177,9 @@ else:
             key="trend_window",
         )
         st.caption("기본값은 ② 직전 5건, ③ 직전 10건입니다. 표본이 충분하면 나머지 기준은 보조비교로 함께 표시됩니다.")
-    results=[]
-    prog=st.progress(0,"분석 중...")
-    for i,b in enumerate(bids):
-        a1=analyze_pattern(b["org"],df_c,pattern_stats)
-        a2=analyze_similar(b["name"],b["base"],df_c,b.get("region",""),similar_window)
-        a3=analyze_trend(b["org"],b["name"],df_c,b.get("region",""),trend_window)
-        lo,hi=recommend_range(a1,a2,a3)
-        conv_std,conv_lbl=convergence_score(a1,a2,a3)
-        amt_lbl,amt_adj,amt_note=get_amt_info(b["base_억"])
-        results.append({"bid":b,"a1":a1,"a2":a2,"a3":a3,
-                        "range_lo":lo,"range_hi":hi,
-                        "conv_std":conv_std,"conv_lbl":conv_lbl,
-                        "amt_lbl":amt_lbl,"amt_adj":amt_adj,"amt_note":amt_note})
-        prog.progress((i+1)/len(bids))
-    prog.empty()
+    with st.spinner("분석 결과 준비 중..."):
+        results=compute_bid_results(bids,df_c,pattern_stats,similar_window,trend_window)
+    st.caption("분석 결과는 입찰파일, 낙찰이력, ②/③ 기준건수가 같으면 캐시에서 재사용됩니다. 선택값 변경은 최종표만 다시 계산합니다.")
 
     # ── 요약 테이블 ──────────────────────────────────────────
     st.subheader(f"📋 자동추천 요약 — {datetime.now().strftime('%Y.%m.%d')} ({len(bids)}건)")
