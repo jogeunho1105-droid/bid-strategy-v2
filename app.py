@@ -1,11 +1,11 @@
 # ╔══════════════════════════════════════════════════════════════════╗
-# ║  투찰전략 분석 시스템 v2.2                                      ║
-# ║  개선: 2026-05-13 낙찰이력 업데이트 반영                       ║
-# ║  - 비한전/조달청: 3포인트 미적용, 단일전략 표시                 ║
+# ║  투찰전략 분석 시스템 v2.3                                      ║
+# ║  개선: 패턴 범위 비교 강화                                     ║
+# ║  - ①패턴: 현재까지의 낙찰이력 차트 기반 분석                   ║
+# ║  - 한전 전체 / 동일 발주처 / 한전 감리·진단 / 동일 발주처 분야  ║
 # ║  - ③트렌드 최소값 보정 (±0.02% 미만 시 보정)                  ║
 # ║  - ②유사표본 없을 때 진단/감리 분야 전체평균으로 대체           ║
 # ║  - 진단 분야 세분화 예측값 → ②유사표본에 통합                  ║
-# ║  - 3포인트 A/C 포인트 업데이트 (최신 이력 반영)                ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
 import streamlit as st
@@ -31,56 +31,16 @@ st.markdown("""
 .val-similar{background:#dcfce7;color:#15803d}
 .val-trend{background:#fef9c3;color:#854d0e}
 .val-rec{background:#f3e8ff;color:#7c3aed}
-.val-a{background:#fee2e2;color:#991b1b;border-radius:8px;padding:10px 15px;
-    font-weight:bold;font-size:1.05em;text-align:center;margin:4px 0}
-.val-b{background:#dbeafe;color:#1d4ed8;border-radius:8px;padding:10px 15px;
-    font-weight:bold;font-size:1.05em;text-align:center;margin:4px 0}
-.val-c{background:#dcfce7;color:#15803d;border-radius:8px;padding:10px 15px;
-    font-weight:bold;font-size:1.05em;text-align:center;margin:4px 0}
 .grade-a{background:#dcfce7;color:#15803d;padding:2px 8px;border-radius:4px;font-weight:bold}
 .grade-b{background:#dbeafe;color:#1d4ed8;padding:2px 8px;border-radius:4px;font-weight:bold}
 .grade-c{background:#fef9c3;color:#854d0e;padding:2px 8px;border-radius:4px;font-weight:bold}
 .grade-d{background:#fee2e2;color:#991b1b;padding:2px 8px;border-radius:4px;font-weight:bold}
-.three-pt-box{background:#f8fafc;border:2px solid #1a2744;border-radius:10px;
-    padding:15px;margin:10px 0}
 </style>""", unsafe_allow_html=True)
 
 DATA_DIR     = "data"
 HISTORY_FILE = os.path.join(DATA_DIR, "history.pkl")
 PATTERN_FILE = os.path.join(DATA_DIR, "pattern_stats.json")
 os.makedirs(DATA_DIR, exist_ok=True)
-
-# ── 3포인트 전략 DB (분위수 기반, 30,614건 2026-05-13 업데이트) ─
-# A = 하위25% 분위수 / B = 예측중심(차트예측) / C = 상위75% 분위수
-# 실제 낙찰 분포는 ±1.5% 전 구간에 균등 분포 (복수예가 무작위 구조)
-# ①②③ 예측은 중앙경향성 / A·C는 실제 분포 커버 역할
-THREE_PT = {
-    "한국전력공사 경기본부":         {"bias":"음수↓","detail":"음60%/중13%/양27%","pt_a":-0.43,"pt_c":+0.27,"cover":67,"cover_r":73,"lo95":-1.01,"hi95":+0.96,"note":"분위수기반"},
-    "한국전력공사 부산울산본부":     {"bias":"음수↓","detail":"음55%/중23%/양23%","pt_a":-0.42,"pt_c":+0.29,"cover":71,"cover_r":87,"lo95":-1.07,"hi95":+0.91,"note":"최근커버 87%"},
-    "한국전력공사 대전세종충남본부": {"bias":"음수↓","detail":"음39%/중29%/양32%","pt_a":-0.45,"pt_c":+0.25,"cover":73,"cover_r":77,"lo95":-1.05,"hi95":+0.80,"note":"대형발주처"},
-    "한국전력공사 인천본부":         {"bias":"음수↓","detail":"음31%/중12%/양56%","pt_a":-0.40,"pt_c":+0.25,"cover":72,"cover_r":75,"lo95":-1.04,"hi95":+0.95,"note":"양수편향"},
-    "한국전력공사 서울본부":         {"bias":"양수↑","detail":"음20%/중20%/양60%","pt_a":-0.44,"pt_c":+0.20,"cover":60,"cover_r":70,"lo95":-1.07,"hi95":+0.83,"note":"양수편향 강함"},
-    "한국전력공사 경북본부":         {"bias":"균형", "detail":"음47%/중18%/양35%","pt_a":-0.38,"pt_c":+0.31,"cover":70,"cover_r":71,"lo95":-1.00,"hi95":+0.87,"note":"균형형"},
-    "한국전력공사 경남본부":         {"bias":"음수↓","detail":"음50%/중30%/양20%","pt_a":-0.44,"pt_c":+0.26,"cover":71,"cover_r":100,"lo95":-1.12,"hi95":+0.81,"note":"최근커버 100%!"},
-    "한국전력공사 광주전남본부":     {"bias":"음수↓","detail":"음52%/중10%/양38%","pt_a":-0.47,"pt_c":+0.24,"cover":68,"cover_r":67,"lo95":-1.08,"hi95":+0.86,"note":"음수편향"},
-    "한국전력공사 대구본부":         {"bias":"음수↓","detail":"음52%/중12%/양36%","pt_a":-0.43,"pt_c":+0.24,"cover":71,"cover_r":72,"lo95":-1.08,"hi95":+0.84,"note":"음수편향"},
-    "한국전력공사 강원본부":         {"bias":"음수↓","detail":"음53%/중13%/양33%","pt_a":-0.45,"pt_c":+0.24,"cover":65,"cover_r":93,"lo95":-1.05,"hi95":+0.83,"note":"최근커버 93%"},
-    "한국전력공사 전북본부":         {"bias":"음수↓","detail":"음56%/중11%/양33%","pt_a":-0.48,"pt_c":+0.24,"cover":73,"cover_r":0, "lo95":-1.08,"hi95":+0.81,"note":"음수편향"},
-    "한국전력공사 충북본부":         {"bias":"음수↓","detail":"음47%/중3%/양50%", "pt_a":-0.43,"pt_c":+0.28,"cover":72,"cover_r":0, "lo95":-1.01,"hi95":+0.88,"note":"균형형"},
-    "한국전력공사 경기북부본부":     {"bias":"균형", "detail":"음53%/중11%/양37%","pt_a":-0.46,"pt_c":+0.30,"cover":70,"cover_r":58,"lo95":-1.07,"hi95":+0.87,"note":"균형형"},
-    "한국전력공사 남서울본부":       {"bias":"균형", "detail":"음50%/중0%/양50%", "pt_a":-0.42,"pt_c":+0.29,"cover":72,"cover_r":0, "lo95":-1.03,"hi95":+0.92,"note":"균형형"},
-    "한국전력공사 제주본부":         {"bias":"음수↓","detail":"음50%/중15%/양35%","pt_a":-0.45,"pt_c":+0.18,"cover":69,"cover_r":0, "lo95":-1.13,"hi95":+0.73,"note":"제주"},
-}
-
-# 3포인트 적용 대상 여부 판단
-def is_three_pt_applicable(org, name):
-    """한전 발주처 + 복수예가 방식인 경우만 3포인트 적용"""
-    if not is_kepco(org):
-        return False
-    # 수의계약, 기초금액 매우 작은 건 제외
-    if any(kw in name for kw in ['수의','소액수의','전자견적']):
-        return False
-    return True
 
 # ── 기초금액 구간별 보정값 ─────────────────────────────────────
 AMT_BRACKETS = {
@@ -98,28 +58,6 @@ def get_amt_info(base_억):
         if lo <= base_억 < hi:
             return label, info["adj"], info["note"]
     return "미정", 0.0, ""
-
-def get_three_pt(org, pred):
-    """발주처별 3포인트 반환. 없으면 기본값"""
-    if org in THREE_PT:
-        d = THREE_PT[org]
-        return {
-            "pt_a": d["pt_a"],
-            "pt_b": round(pred, 4),   # 차트예측값
-            "pt_c": d["pt_c"],
-            "bias": d["bias"],
-            "detail": d["detail"],
-            "cover": d["cover"],
-            "cover_r": d["cover_r"],
-            "note": d["note"],
-            "found": True
-        }
-    return {
-        "pt_a": -0.40, "pt_b": round(pred, 4), "pt_c": +0.20,
-        "bias": "균형", "detail": "이력 부족",
-        "cover": 60, "cover_r": 0, "note": "기본값 적용",
-        "found": False
-    }
 
 # ── 낙찰이력 로드 ─────────────────────────────────────────────
 @st.cache_data
@@ -361,7 +299,7 @@ def tr_org(org):
                .replace("조달청","PPS").replace("국군재정관리단","MND"))
 
 # ── 흐름 차트 ─────────────────────────────────────────────────
-def make_flow_chart(a1,a2,a3,lo,hi,org_raw,three_pt=None):
+def make_flow_chart(a1,a2,a3,lo,hi,org_raw):
     all_v=(a1.get("all_vals") or a1.get("recent10",[])) if a1 else []
     if not all_v: return None
     org_en=tr_org(org_raw)
@@ -391,41 +329,18 @@ def make_flow_chart(a1,a2,a3,lo,hi,org_raw,three_pt=None):
                     color="#059669" if v>=0 else "#dc2626",fontweight="bold")
     ax.axvline(show_n+0.5,color="#7c3aed",lw=1.4,ls=":",alpha=0.75)
 
-    # 3포인트 표시
-    if three_pt:
-        pts=[
-            ("A",three_pt["pt_a"],"#991b1b","v",10),
-            ("B",three_pt["pt_b"],"#1d4ed8","D",11),
-            ("C",three_pt["pt_c"],"#15803d","^",10),
-        ]
-        xoff=[-0.35,0.0,0.35]
-        for idx,(lbl,pv,pc,mk,ms) in enumerate(pts):
-            px=next_x+xoff[idx]
-            ax.plot([px],[pv],color=pc,marker=mk,ms=ms,zorder=7,
-                    markeredgecolor="white",markeredgewidth=1.2)
-            ax.annotate(f"{lbl}:{pv:+.4f}%",xy=(px,pv),xytext=(22,0),
-                        textcoords="offset points",ha="left",fontsize=8,
-                        color=pc,fontweight="bold",
-                        arrowprops=dict(arrowstyle="->",color=pc,lw=1.1))
-        # 커버율 표시
-        cover_txt=f"Cover:{three_pt['cover']}%"
-        if three_pt['cover_r']>0: cover_txt+=f"(R:{three_pt['cover_r']}%)"
-        ax.text(next_x+2.5,ax.get_ylim()[1]*0.9,cover_txt,
-                fontsize=8,color="#7c3aed",fontweight="bold",ha="center",
-                bbox=dict(boxstyle="round,pad=0.3",fc="#f3e8ff",ec="#7c3aed",alpha=0.85))
-    else:
-        preds=[]
-        if a1: preds.append(("(1)Pattern",a1["pred"],"#1d4ed8","D",10))
-        if a2: preds.append(("(2)Similar",a2["pred"],"#15803d","s",10))
-        if a3: preds.append(("(3)Trend",  a3["pred"],"#92400e","^",10))
-        xoff=[-0.32,0.0,0.32]
-        for idx,(lbl,pv,pc,mk,ms) in enumerate(preds):
-            px=next_x+xoff[idx]
-            ax.plot([px],[pv],color=pc,marker=mk,ms=ms,zorder=7,
-                    markeredgecolor="white",markeredgewidth=1.1)
-            ax.annotate(f"{pv:+.4f}%",xy=(px,pv),xytext=(20,0),
-                        textcoords="offset points",ha="left",fontsize=8,color=pc,
-                        fontweight="bold",arrowprops=dict(arrowstyle="->",color=pc,lw=1.1))
+    preds=[]
+    if a1: preds.append(("(1)Pattern",a1["pred"],"#1d4ed8","D",10))
+    if a2: preds.append(("(2)Similar",a2["pred"],"#15803d","s",10))
+    if a3: preds.append(("(3)Trend",  a3["pred"],"#92400e","^",10))
+    xoff=[-0.32,0.0,0.32]
+    for idx,(lbl,pv,pc,mk,ms) in enumerate(preds):
+        px=next_x+xoff[idx]
+        ax.plot([px],[pv],color=pc,marker=mk,ms=ms,zorder=7,
+                markeredgecolor="white",markeredgewidth=1.1)
+        ax.annotate(f"{pv:+.4f}%",xy=(px,pv),xytext=(20,0),
+                    textcoords="offset points",ha="left",fontsize=8,color=pc,
+                    fontweight="bold",arrowprops=dict(arrowstyle="->",color=pc,lw=1.1))
 
     if lo is not None and hi is not None:
         bx=next_x+1.3
@@ -470,7 +385,6 @@ def make_flow_chart(a1,a2,a3,lo,hi,org_raw,three_pt=None):
 
     a2n=a2["n"] if a2 else "-"
     grade_color={"A":"#15803d","B":"#1d4ed8","C":"#854d0e","D":"#991b1b"}.get(grade,"#475569")
-    tp=three_pt or {}
     items=[
         (0.01,"line","#1a2744","","Actual bid result",  f"Last {show_n} results"),
         (0.01,"line","#6366f1","","Moving Avg MA(5)",    "5-case moving average"),
@@ -482,9 +396,9 @@ def make_flow_chart(a1,a2,a3,lo,hi,org_raw,three_pt=None):
         (0.515,"dot",grade_color,"","Accuracy Grade",    f"Grade:{grade} MAE:{mae:.3f}%"),
         (0.515,"dot","#7c3aed","","Last 5 avg (r5)",     f"{a1['r5']:+.4f}%"),
         (0.515,"dot","#7c3aed","","Last 10 avg (r10)",   f"{a1['r10']:+.4f}%"),
-        (0.765,"mark","#991b1b","v","Co.A (음수/헷지)",  f"{tp.get('pt_a',0):+.2f}%"),
-        (0.765,"mark","#1d4ed8","D","Co.B (차트예측)",   f"{tp.get('pt_b',0):+.4f}%"),
-        (0.765,"mark","#15803d","^","Co.C (양수/헷지)",  f"{tp.get('pt_c',0):+.2f}%  Cover:{tp.get('cover',0)}%"),
+        (0.765,"dot","#1d4ed8","","Pattern Scope",       "하단 4개 범위 차트 확인"),
+        (0.765,"dot","#15803d","","Similar/Trend",       "보조 판단값"),
+        (0.765,"dot","#7c3aed","","Recommended",         "종합 권장구간"),
     ]
     row_cnt={0.01:0,0.265:0,0.515:0,0.765:0}
     TOP_Y=0.72; ROW_GAP=0.225
@@ -556,6 +470,86 @@ def analyze_sup_org(org,df_c):
     v=_sector_vals(df_c,org,['감리'])
     return _sector_stat(v,f"{org.replace('한국전력공사 ','').replace('본부','')} Supervision")
 
+def _field_keywords(name):
+    if is_diag(name):
+        return "진단", DIAG_KWS
+    if is_supervision(name):
+        return "감리", ["감리"]
+    return "감리/진단", ["감리"] + DIAG_KWS
+
+def _pattern_vals(df_c, org_filter=None, keywords=None):
+    if df_c is None or len(df_c)==0:
+        return np.array([])
+    mask = pd.Series([True]*len(df_c), index=df_c.index)
+    if org_filter:
+        mask = mask & df_c['발주기관'].astype(str).str.contains(org_filter, na=False, regex=False)
+    if keywords:
+        kw_mask = pd.Series([False]*len(df_c), index=df_c.index)
+        for kw in keywords:
+            kw_mask = kw_mask | df_c['공고명'].astype(str).str.contains(kw, na=False, regex=False)
+        mask = mask & kw_mask
+    vals = df_c.loc[mask, '예가/기초(0%)'].dropna().values
+    return vals
+
+def build_pattern_scopes(org, name, df_c):
+    field_label, keywords = _field_keywords(name)
+    org_short = str(org).replace('한국전력공사 ','').replace('본부','')
+    scopes = [
+        _sector_stat(_pattern_vals(df_c, '한국전력공사'), '한국전력공사 전체 패턴'),
+        _sector_stat(_pattern_vals(df_c, org), f'{org_short} 전체 패턴'),
+        _sector_stat(_pattern_vals(df_c, '한국전력공사', keywords), f'한국전력공사 {field_label} 전체 패턴'),
+        _sector_stat(_pattern_vals(df_c, org, keywords), f'{org_short} {field_label} 패턴'),
+    ]
+    return [s for s in scopes if s]
+
+def make_pattern_scope_chart(scopes, lo, hi, title):
+    if not scopes:
+        return None
+    n = min(4, len(scopes))
+    fig, axes = plt.subplots(2, 2, figsize=(13, 7.2), facecolor='#f8fafc')
+    axes = axes.flatten()
+    colors = ['#1d4ed8', '#dc2626', '#15803d', '#7c3aed']
+    for idx, ax in enumerate(axes):
+        ax.set_facecolor('#ffffff')
+        if idx >= n:
+            ax.axis('off')
+            continue
+        data = scopes[idx]
+        vals = data.get('all_vals') or data.get('recent10', [])
+        show_n = min(30, len(vals))
+        recent = vals[-show_n:]
+        x = np.arange(1, show_n+1)
+        mv = data['mean']; pv = data['pred']; color = colors[idx]
+        ax.axhline(0, color='#94a3b8', lw=1.0, alpha=0.7, zorder=1)
+        ax.axhline(mv, color='#f59e0b', lw=1.2, ls='--', alpha=0.8, zorder=2)
+        if lo is not None and hi is not None:
+            ax.axhspan(lo, hi, alpha=0.10, color='#7c3aed', zorder=1)
+        ma5 = [np.mean(recent[max(0, i-4):i+1]) for i in range(show_n)]
+        ax.plot(x, ma5, color='#6366f1', lw=1.3, ls='--', alpha=0.7, zorder=3)
+        bar_c = [color if v >= 0 else '#94a3b8' for v in recent]
+        ax.bar(x, recent, color=bar_c, alpha=0.36, width=0.65, zorder=2)
+        ax.plot(x, recent, color='#1a2744', lw=1.2, marker='o', ms=3.0, zorder=4)
+        ax.axvline(show_n+0.5, color='#7c3aed', lw=1.0, ls=':', alpha=0.7)
+        ax.plot([show_n+1], [pv], marker='D', color='#7c3aed', ms=8, zorder=7,
+                markeredgecolor='white', markeredgewidth=1.0)
+        ax.annotate(f'{pv:+.4f}%', xy=(show_n+1, pv), xytext=(13,0),
+                    textcoords='offset points', ha='left', fontsize=7.5,
+                    color='#7c3aed', fontweight='bold',
+                    arrowprops=dict(arrowstyle='->', color='#7c3aed', lw=0.9))
+        ax.set_xlim(0.3, show_n+3.0)
+        ax.set_xticks(list(x[::max(1, show_n//6)]) + [show_n+1])
+        ax.tick_params(labelsize=7)
+        ax.grid(axis='y', alpha=0.16, ls='--')
+        ax.set_title(
+            f"{data['scope']} | n={data['n']} | 평균 {mv:+.4f}% | 표준편차 {data['std']:.4f}%",
+            fontsize=8.5, fontweight='bold', color='#1a2744', pad=6
+        )
+    fig.suptitle(title, fontsize=11, fontweight='bold', color='#1a2744', y=0.995)
+    plt.tight_layout(pad=1.2)
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=130, bbox_inches='tight', facecolor='#f8fafc')
+    buf.seek(0); plt.close(); return buf
+
 def make_sector_chart(d_all,d_org,lo,hi,title):
     datasets=[]
     if d_all: datasets.append((d_all,d_all['scope'],'#1d4ed8'))
@@ -606,7 +600,7 @@ def make_excel(results):
     from openpyxl.styles import Font,PatternFill,Alignment,Border,Side
     from openpyxl.utils import get_column_letter
     NAVY="FF1a2744";BLUE="FFdbeafe";GREEN="FFdcfce7";AMBER="FFfef9c3"
-    RED_L="FFfee2e2";PURP="FFf3e8ff";GRAY="FFf8fafc";RED2="FFfca5a5";GRN2="FFbbf7d0"
+    RED_L="FFfee2e2";PURP="FFf3e8ff";GRAY="FFf8fafc"
     thin=Side(style="thin",color="FFd1d5db"); bdr=Border(left=thin,right=thin,top=thin,bottom=thin)
     def H(ws,r,c,v,bg=NAVY,fg="FFFFFFFF",sz=10,bold=True,wrap=False):
         cell=ws.cell(row=r,column=c,value=v)
@@ -625,17 +619,16 @@ def make_excel(results):
 
     wb=Workbook(); ws=wb.active; ws.title="투찰전략"; ws.sheet_view.showGridLines=False
     today=datetime.now().strftime("%Y.%m.%d")
-    ws.merge_cells("A1:N1"); t=ws["A1"]
-    t.value=f"투찰전략 분석표 — {today}  ★ 3가지 분석값 + 3개업체 분산투찰 전략"
+    ws.merge_cells("A1:J1"); t=ws["A1"]
+    t.value=f"투찰전략 분석표 — {today}  ★ 패턴/유사표본/트렌드 종합"
     t.font=Font(name="맑은 고딕",bold=True,size=13,color="FF1a2744")
     t.fill=PatternFill("solid",start_color="FFe0e7ff")
     t.alignment=Alignment(horizontal="center",vertical="center")
     ws.row_dimensions[1].height=30
 
     hdrs=["No","공고명","발주기관","기초금액(억)","마감",
-          "①패턴(%)","②유사표본(%)","③트렌드(%)","권장하한(%)","권장상한(%)",
-          "업체A(%)","업체B(%)","업체C(%)","커버율"]
-    wids=[5,40,20,10,12,10,10,10,10,10,10,10,10,8]
+          "①패턴(%)","②유사표본(%)","③트렌드(%)","권장하한(%)","권장상한(%)"]
+    wids=[5,40,20,10,12,10,10,10,10,10]
     for i,(h,w) in enumerate(zip(hdrs,wids),1):
         H(ws,2,i,h,wrap=True); ws.column_dimensions[get_column_letter(i)].width=w
     ws.row_dimensions[2].height=36
@@ -643,7 +636,7 @@ def make_excel(results):
     for i,row in enumerate(results):
         r=i+3; bg=GRAY if r%2==0 else "FFFFFFFF"
         b=row["bid"]; a1=row["a1"]; a2=row["a2"]; a3=row["a3"]
-        lo,hi=row["range_lo"],row["range_hi"]; tp=row.get("three_pt")
+        lo,hi=row["range_lo"],row["range_hi"]
         C(ws,r,1,b["no"],bg=bg,bold=True,center=True)
         C(ws,r,2,b["name"][:48],bg=bg,sz=9,wrap=True)
         C(ws,r,3,b["org"],bg=bg,sz=9)
@@ -662,73 +655,17 @@ def make_excel(results):
                 cx3=C(ws,r,ci,val,bg=PURP,right=True,bold=True,color="FF7c3aed")
                 cx3.number_format="+0.0000;-0.0000"
             else: C(ws,r,ci,"-",bg=bg,center=True)
-        # 3포인트
-        if tp:
-            cx_a=C(ws,r,11,tp["pt_a"],bg=RED2,right=True,bold=True,color="FF991b1b")
-            cx_a.number_format="+0.00;-0.00"
-            cx_b=C(ws,r,12,tp["pt_b"],bg=BLUE,right=True,bold=True,color="FF1d4ed8")
-            cx_b.number_format="+0.0000;-0.0000"
-            cx_c=C(ws,r,13,tp["pt_c"],bg=GRN2,right=True,bold=True,color="FF15803d")
-            cx_c.number_format="+0.00;-0.00"
-            C(ws,r,14,f"{tp['cover']}%",bg=PURP,center=True,bold=True,color="FF7c3aed")
-        else:
-            for ci in [11,12,13,14]: C(ws,r,ci,"-",bg=bg,center=True)
         ws.row_dimensions[r].height=34
-
-    # Sheet2: 3포인트 상세
-    ws2=wb.create_sheet("3포인트 전략"); ws2.sheet_view.showGridLines=False
-    ws2.merge_cells("A1:H1"); t2=ws2["A1"]
-    t2.value="3개 업체 분산투찰 전략표 — 30,614건 기반"
-    t2.font=Font(name="맑은 고딕",bold=True,size=12,color="FF1a2744")
-    t2.fill=PatternFill("solid",start_color="FFe0e7ff")
-    t2.alignment=Alignment(horizontal="center",vertical="center")
-    ws2.row_dimensions[1].height=28
-    hdrs2=["No","공고명","발주기관","기초금액","업체A포인트","업체B포인트(차트예측)","업체C포인트","커버율"]
-    wids2=[5,40,20,12,14,18,14,10]
-    for i,(h,w) in enumerate(zip(hdrs2,wids2),1):
-        H(ws2,2,i,h,wrap=True); ws2.column_dimensions[get_column_letter(i)].width=w
-    ws2.row_dimensions[2].height=30
-
-    for i,row in enumerate(results):
-        r=i+3; bg=GRAY if r%2==0 else "FFFFFFFF"
-        b=row["bid"]; tp=row.get("three_pt")
-        C(ws2,r,1,b["no"],bg=bg,center=True,bold=True)
-        C(ws2,r,2,b["name"][:55],bg=bg,sz=9,wrap=True)
-        C(ws2,r,3,b["org"],bg=bg,sz=9)
-        if b["base"]>0:
-            cx=C(ws2,r,4,b["base_억"],bg=bg,right=True); cx.number_format="#,##0.0000억"
-        else: C(ws2,r,4,"미정",bg=bg,center=True)
-        if tp:
-            pa=tp["pt_a"]; pb=tp["pt_b"]; pc_v=tp["pt_c"]
-            # 투찰금액
-            if b["base"]>0:
-                amt_a=int(b["base"]*(100+pa)/100)
-                amt_b=int(b["base"]*(100+pb)/100)
-                amt_c=int(b["base"]*(100+pc_v)/100)
-                cxa=C(ws2,r,5,f"{pa:+.2f}% ({amt_a:,}원)",bg=RED2,bold=True,color="FF991b1b",center=True)
-                cxb=C(ws2,r,6,f"{pb:+.4f}% ({amt_b:,}원)",bg=BLUE,bold=True,color="FF1d4ed8",center=True)
-                cxc=C(ws2,r,7,f"{pc_v:+.2f}% ({amt_c:,}원)",bg=GRN2,bold=True,color="FF15803d",center=True)
-            else:
-                C(ws2,r,5,f"{pa:+.2f}%",bg=RED2,bold=True,color="FF991b1b",center=True)
-                C(ws2,r,6,f"{pb:+.4f}%",bg=BLUE,bold=True,color="FF1d4ed8",center=True)
-                C(ws2,r,7,f"{pc_v:+.2f}%",bg=GRN2,bold=True,color="FF15803d",center=True)
-            cover_str=f"{tp['cover']}%"
-            if tp['cover_r']>0: cover_str+=f"\n최근:{tp['cover_r']}%"
-            C(ws2,r,8,cover_str,bg=PURP,bold=True,color="FF7c3aed",center=True,wrap=True)
-        else:
-            for ci in range(5,9): C(ws2,r,ci,"-",bg=bg,center=True)
-        ws2.row_dimensions[r].height=36
-    ws2.freeze_panes="A3"
 
     buf=io.BytesIO(); wb.save(buf); buf.seek(0); return buf
 
 # ════════════════════════════════════════════════════════════════
 #  메인 UI
 # ════════════════════════════════════════════════════════════════
-st.markdown("""
+    st.markdown("""
 <div class="main-header">
 <h2>📊 투찰전략 분석 시스템</h2>
-<p style="margin:0;opacity:0.8">3가지 분석 + 3개 업체 분산투찰 전략 | v2.2 | 30,614건+ 기반</p>
+<p style="margin:0;opacity:0.8">패턴 범위 비교 + 유사표본 + 최근 트렌드 | v2.3 | 낙찰이력 기반</p>
 </div>""", unsafe_allow_html=True)
 
 with st.sidebar:
@@ -757,42 +694,24 @@ if mode=="🔧 배포자 관리":
         st.stop()
     if pwd!=ADMIN_PWD: st.info("비밀번호를 입력하세요."); st.stop()
     st.success("✅ 관리자 인증")
-    tab1,tab2=st.tabs(["📂 낙찰이력 업로드","📊 3포인트 전략 현황"])
-    with tab1:
-        uploaded=st.file_uploader("낙찰이력 xlsx 업로드",type=["xlsx","xls"])
-        if uploaded:
-            with st.spinner("처리 중..."):
-                try:
-                    content=uploaded.read()
-                    df_new=pd.read_excel(io.BytesIO(content))
-                    required=["발주기관","공고명","기초금액","예가/기초(0%)"]
-                    missing=[c for c in required if c not in df_new.columns]
-                    if missing: st.error(f"필수 컬럼 없음: {missing}")
-                    else:
-                        save_history(df_new)
-                        df_v=df_new[df_new["예가/기초(0%)"].notna()&(df_new["예가/기초(0%)"].abs()<10)]
-                        st.success("✅ 업로드 완료!")
-                        c1,c2,c3=st.columns(3)
-                        c1.metric("총 건수",f"{len(df_v):,}건")
-                        c2.metric("발주처 수",f"{df_v['발주기관'].nunique()}개")
-                        c3.metric("평균 사정율",f"{df_v['예가/기초(0%)'].mean():+.4f}%")
-                except Exception as e: st.error(f"오류: {e}")
-    with tab2:
-        st.subheader("3포인트 전략 DB (30,614건 기반)")
-        tp_rows=[]
-        for org,d in THREE_PT.items():
-            bias_icon="🔵" if "음수" in d['bias'] else "🔴" if "양수" in d['bias'] else "⚪"
-            tp_rows.append({
-                "발주처":org.replace("한국전력공사 ","한전 "),
-                "편향":f"{bias_icon}{d['bias']}",
-                "편향상세":d['detail'],
-                "업체A":f"{d['pt_a']:+.2f}%",
-                "업체C":f"{d['pt_c']:+.2f}%",
-                "전체커버":f"{d['cover']}%",
-                "최근커버":f"{d['cover_r']}%" if d['cover_r']>0 else "-",
-                "비고":d['note']
-            })
-        st.dataframe(pd.DataFrame(tp_rows),use_container_width=True,hide_index=True)
+    uploaded=st.file_uploader("낙찰이력 xlsx 업로드",type=["xlsx","xls"])
+    if uploaded:
+        with st.spinner("처리 중..."):
+            try:
+                content=uploaded.read()
+                df_new=pd.read_excel(io.BytesIO(content))
+                required=["발주기관","공고명","기초금액","예가/기초(0%)"]
+                missing=[c for c in required if c not in df_new.columns]
+                if missing: st.error(f"필수 컬럼 없음: {missing}")
+                else:
+                    save_history(df_new)
+                    df_v=df_new[df_new["예가/기초(0%)"].notna()&(df_new["예가/기초(0%)"].abs()<10)]
+                    st.success("✅ 업로드 완료!")
+                    c1,c2,c3=st.columns(3)
+                    c1.metric("총 건수",f"{len(df_v):,}건")
+                    c2.metric("발주처 수",f"{df_v['발주기관'].nunique()}개")
+                    c3.metric("평균 사정율",f"{df_v['예가/기초(0%)'].mean():+.4f}%")
+            except Exception as e: st.error(f"오류: {e}")
 
 # ══ 투찰전략 분석 ════════════════════════════════════════════════
 else:
@@ -810,11 +729,10 @@ else:
         st.markdown(f"""
         <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:12px;font-size:0.9em">
         <b>📌 분석 방법</b><br>
-        🔵 ①패턴: 발주처 이력 패턴분석<br>
+        🔵 ①패턴: 한전/동일발주처/분야별 이력 패턴차트<br>
         🟢 ②유사표본: 유사용역 낙찰이력<br>
         🟡 ③트렌드: 최근 흐름 분석<br>
         🟣 💡권장: 3가지 종합 권장구간<br>
-        🔴 <b>3포인트: A/B/C 분산투찰 전략</b><br><br>
         <b>데이터:</b> {nc:,}건 | {no}개 발주처
         </div>""",unsafe_allow_html=True)
 
@@ -858,14 +776,10 @@ else:
         lo,hi=recommend_range(a1,a2,a3)
         conv_std,conv_lbl=convergence_score(a1,a2,a3)
         amt_lbl,amt_adj,amt_note=get_amt_info(b["base_억"])
-        # 3포인트: 한전 + 수의계약 제외
-        pred_val=a1["pred"] if a1 else 0.0
-        tp=get_three_pt(b["org"],pred_val) if is_three_pt_applicable(b["org"],b["name"]) else None
         results.append({"bid":b,"a1":a1,"a2":a2,"a3":a3,
                         "range_lo":lo,"range_hi":hi,
                         "conv_std":conv_std,"conv_lbl":conv_lbl,
-                        "amt_lbl":amt_lbl,"amt_adj":amt_adj,"amt_note":amt_note,
-                        "three_pt":tp})
+                        "amt_lbl":amt_lbl,"amt_adj":amt_adj,"amt_note":amt_note})
         prog.progress((i+1)/len(bids))
     prog.empty()
 
@@ -874,11 +788,9 @@ else:
     rows=[]
     for row in results:
         b=row["bid"]; a1=row["a1"]; a2=row["a2"]; a3=row["a3"]
-        lo,hi=row["range_lo"],row["range_hi"]; tp=row["three_pt"]
+        lo,hi=row["range_lo"],row["range_hi"]
         grade=a1.get("grade","?") if a1 else "?"
         ge={"A":"🟢","B":"🔵","C":"🟡","D":"🔴"}.get(grade,"⚪")
-        tp_str=f"A:{tp['pt_a']:+.2f} B:{tp['pt_b']:+.4f} C:{tp['pt_c']:+.2f} ({tp['cover']}%)" if tp else "-"
-        lo95_str=f"{tp['lo95']:+.2f}~{tp['hi95']:+.2f}%" if (tp and tp.get('lo95')) else "-"
         rows.append({"No":b["no"],
             "공고명":b["name"][:33]+"…" if len(b["name"])>33 else b["name"],
             "발주기관":b["org"].replace("한국전력공사 ","한전 "),
@@ -889,20 +801,17 @@ else:
             "③트렌드":f"{a3['pred']:+.4f}%" if a3 else "없음",
             "💡하한":f"{lo:+.4f}%" if lo else "-",
             "💡상한":f"{hi:+.4f}%" if hi else "-",
-            "수렴도":row["conv_lbl"],"등급":f"{ge}{grade}",
-            "3포인트":tp_str,
-            "실분포95%":lo95_str})
+            "수렴도":row["conv_lbl"],"등급":f"{ge}{grade}"})
     st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True,
                  column_config={"No":st.column_config.NumberColumn(width=50),
-                                "공고명":st.column_config.TextColumn(width=200),
-                                "3포인트":st.column_config.TextColumn(width=220)})
+                                "공고명":st.column_config.TextColumn(width=200)})
     st.divider()
 
     # ── 건별 상세 ────────────────────────────────────────────
     st.subheader("📌 건별 상세 + 사정율 흐름 차트")
     for row in results:
         b=row["bid"]; a1=row["a1"]; a2=row["a2"]; a3=row["a3"]
-        lo,hi=row["range_lo"],row["range_hi"]; tp=row["three_pt"]
+        lo,hi=row["range_lo"],row["range_hi"]
         grade=a1.get("grade","?") if a1 else "?"
         ge={"A":"🟢","B":"🔵","C":"🟡","D":"🔴"}.get(grade,"⚪")
         label=(f"No.{b['no']}  {b['name'][:48]}  |  "
@@ -956,90 +865,37 @@ else:
                 else:
                     st.markdown('<div class="val-box" style="background:#fee2e2;color:#991b1b">⚠️ 데이터부족</div>',unsafe_allow_html=True)
 
-            # ── 3포인트 분산투찰 카드 (한전만) ───────────────
-            if tp:
-                st.markdown("---")
-                bias_icon="🔵" if "음수" in tp["bias"] else "🔴" if "양수" in tp["bias"] else "⚪"
-                cover_r_str=f" | 최근커버: **{tp['cover_r']}%**" if tp['cover_r']>0 else ""
-                lo95=tp.get("lo95",0); hi95=tp.get("hi95",0)
-                st.markdown(
-                    f"**🏢 3개 업체 분산투찰 전략** &nbsp;"
-                    f"{bias_icon} 편향: **{tp['bias']}** ({tp['detail']}) &nbsp;|&nbsp; "
-                    f"커버율: **{tp['cover']}%**{cover_r_str}",
-                    unsafe_allow_html=False
-                )
-                # ── 복수예가 분포 안내 ──────────────────────────
-                if lo95 and hi95:
-                    st.info(
-                        f"📊 **복수예가 실제 분포 안내** — "
-                        f"실제 낙찰은 **{lo95:+.2f}% ~ {hi95:+.2f}%** 전 구간에 균등 분포합니다 (95% 범위). "
-                        f"①②③ 예측값은 중앙경향성(평균 근처)이며, "
-                        f"업체A·C는 실제 분포의 **하위25%({tp['pt_a']:+.2f}%)·상위75%({tp['pt_c']:+.2f}%)** 구간을 커버합니다."
-                    )
-                ca,cb,cc=st.columns(3)
-                with ca:
-                    amt_a=f"\n{int(b['base']*(100+tp['pt_a'])/100):,}원" if b['base']>0 else ""
-                    st.markdown(f'<div class="val-a">🏢 업체A<br>{tp["pt_a"]:+.2f}%{amt_a}</div>',unsafe_allow_html=True)
-                    st.caption(f"▶ 하위25% 분위수 | {'음수주력' if '음수' in tp['bias'] else '음수헷지'}")
-                    if b['base']>0: st.caption(f"※ 수익성 검토 필요")
-                with cb:
-                    amt_b=f"\n{int(b['base']*(100+tp['pt_b'])/100):,}원" if b['base']>0 else ""
-                    st.markdown(f'<div class="val-b">🏢 업체B (차트예측)<br>{tp["pt_b"]:+.4f}%{amt_b}</div>',unsafe_allow_html=True)
-                    st.caption("▶ 중앙경향성 예측값 (핵심 포인트)")
-                with cc:
-                    amt_c=f"\n{int(b['base']*(100+tp['pt_c'])/100):,}원" if b['base']>0 else ""
-                    st.markdown(f'<div class="val-c">🏢 업체C<br>{tp["pt_c"]:+.2f}%{amt_c}</div>',unsafe_allow_html=True)
-                    st.caption(f"▶ 상위75% 분위수 | {'양수주력' if '양수' in tp['bias'] else '양수헷지'}")
-
             # ── 흐름 차트 ─────────────────────────────────────
             if a1 and (a1.get("all_vals") or a1.get("recent10")):
                 st.markdown("---")
                 with st.spinner("차트 생성 중..."):
-                    chart_buf=make_flow_chart(a1,a2,a3,lo,hi,b["org"],tp)
+                    chart_buf=make_flow_chart(a1,a2,a3,lo,hi,b["org"])
                 if chart_buf: st.image(chart_buf,use_container_width=True)
             else:
                 st.caption("⚠️ 이력 데이터 부족")
 
-            # ── 한전 세분화 차트 ──────────────────────────────
-            if is_kepco(b["org"]) and df_c is not None:
-                if is_diag(b["name"]):
-                    st.markdown("---")
-                    st.markdown(f"**📡 ENG 진단 분야 세분화** (광학·초음파·VLF·PD·콘크리트)")
-                    d_all=analyze_diag_all(df_c); d_org=analyze_diag_org(b["org"],df_c)
-                    if d_all or d_org:
-                        col_da,col_db=st.columns(2)
-                        with col_da:
-                            if d_all: st.metric("전체 한전 진단 평균",f"{d_all['pred']:+.4f}%",f"n={d_all['n']}건")
-                        with col_db:
-                            if d_org:
-                                org_s=b['org'].replace('한국전력공사 ','').replace('본부','')
-                                st.metric(f"{org_s} 진단 평균",f"{d_org['pred']:+.4f}%",f"n={d_org['n']}건")
-                        with st.spinner("진단 비교차트..."):
-                            sec_buf=make_sector_chart(d_all,d_org,lo,hi,
-                                f"ENG Diagnosis — All KEPCO vs {tr_org(b['org'])}")
-                        if sec_buf: st.image(sec_buf,use_container_width=True)
-                elif is_supervision(b["name"]):
-                    st.markdown("---")
-                    st.markdown("**🏗️ 감리 분야 세분화**")
-                    s_all=analyze_sup_all(df_c); s_org=analyze_sup_org(b["org"],df_c)
-                    if s_all or s_org:
-                        col_sa,col_sb=st.columns(2)
-                        with col_sa:
-                            if s_all: st.metric("전체 한전 감리 평균",f"{s_all['pred']:+.4f}%",f"n={s_all['n']}건")
-                        with col_sb:
-                            if s_org:
-                                org_s=b['org'].replace('한국전력공사 ','').replace('본부','')
-                                st.metric(f"{org_s} 감리 평균",f"{s_org['pred']:+.4f}%",f"n={s_org['n']}건")
-                        with st.spinner("감리 비교차트..."):
-                            sec_buf=make_sector_chart(s_all,s_org,lo,hi,
-                                f"Supervision — All KEPCO vs {tr_org(b['org'])}")
-                        if sec_buf: st.image(sec_buf,use_container_width=True)
+            # ── ① 패턴 범위 비교 차트 ─────────────────────────
+            if df_c is not None:
+                st.markdown("---")
+                st.markdown("**① 패턴 범위 비교**")
+                scopes = build_pattern_scopes(b["org"], b["name"], df_c)
+                if scopes:
+                    cols = st.columns(min(4, len(scopes)))
+                    for col, scope in zip(cols, scopes):
+                        with col:
+                            st.metric(scope["scope"], f"{scope['pred']:+.4f}%", f"n={scope['n']}건")
+                            st.caption(f"평균 {scope['mean']:+.4f}% / 표준편차 {scope['std']:.4f}%")
+                    with st.spinner("패턴 범위 비교차트..."):
+                        scope_buf = make_pattern_scope_chart(scopes, lo, hi, f"Pattern Scope — {tr_org(b['org'])}")
+                    if scope_buf: st.image(scope_buf, use_container_width=True)
+                else:
+                    st.caption("패턴 범위 비교를 위한 표본이 부족합니다.")
 
     st.divider()
     st.subheader("💾 전략표 다운로드")
     excel_buf=make_excel(results)
     today_str=datetime.now().strftime("%Y%m%d")
-    st.download_button("📥 엑셀 다운로드 (v2.1 — 3포인트 전략 포함)",
+    st.download_button("📥 엑셀 다운로드 (패턴 분석)",
         data=excel_buf,
         file_name=f"투찰전략_{today_str}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
