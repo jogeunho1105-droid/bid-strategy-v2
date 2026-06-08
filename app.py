@@ -1,5 +1,5 @@
 # ╔══════════════════════════════════════════════════════════════════╗
-# ║  투찰전략 분석 시스템 v2.3                                      ║
+# ║  투찰전략 분석 시스템 v2.4                                      ║
 # ║  개선: 패턴 범위 비교 강화                                     ║
 # ║  - ①패턴: 현재까지의 낙찰이력 차트 기반 분석                   ║
 # ║  - 한전 전체 / 동일 발주처 / 한전 감리·진단 / 동일 발주처 분야  ║
@@ -217,6 +217,40 @@ def _similar_pattern_prediction(sim, window=5, top_k=5):
         "next_vals": [],
     }
 
+def _similar_candidate_from_pool(label, pool, window=5, basis=""):
+    pool = _sort_by_open_date(pool)
+    if pool is None or len(pool) < 3:
+        return None
+    pred_info = _similar_pattern_prediction(pool, window=window, top_k=5)
+    if not pred_info:
+        return None
+    vals = pool["예가/기초(0%)"].dropna().values
+    if len(vals) < 3:
+        return None
+    co = pool["업체수"].mean() if "업체수" in pool.columns else None
+    return {
+        "label": label,
+        "pred": round(float(pred_info["pred"]), 4),
+        "n": len(vals),
+        "mean": round(float(np.mean(vals)), 4),
+        "std": round(float(np.std(vals)), 4),
+        "avg_companies": round(float(co), 1) if co is not None and not np.isnan(float(co)) else None,
+        "method": pred_info["method"],
+        "best_distance": round(float(pred_info["best_distance"]), 4) if pred_info["best_distance"] is not None else None,
+        "matched_n": pred_info["matched_n"],
+        "next_vals": pred_info["next_vals"],
+        "basis": basis,
+    }
+
+def _pick_best_candidate(candidates):
+    valid = [c for c in candidates if c]
+    if not valid:
+        return None
+    with_dist = [c for c in valid if c.get("best_distance") is not None]
+    if with_dist:
+        return sorted(with_dist, key=lambda c: (c["best_distance"], -c["n"], c["std"]))[0]
+    return sorted(valid, key=lambda c: (c["std"], -c["n"]))[0]
+
 def analyze_similar(name, base_원, df_c, region=""):
     """② 유사표본: 용역성격/지역/업체수 10단위 구간으로 표본화 후 직전 5건 유사패턴 분석."""
     if df_c is None or base_원<=0: return None
@@ -232,25 +266,37 @@ def analyze_similar(name, base_원, df_c, region=""):
         base_pool = work[mask & amt_mask].copy()
 
     region_label = _region_key(region) or _region_key(name)
-    region_used = False
+    candidates = []
+    field_pool = base_pool.copy()
+    candidates.append(_similar_candidate_from_pool(
+        f"분야:{label}", field_pool, window=5,
+        basis=f"용역성격 {label}, 기초금액 유사범위"
+    ))
+
+    region_pool = pd.DataFrame()
     if region_label and "지역" in base_pool.columns:
         rmask = base_pool["지역"].astype(str).str.contains(region_label, na=False, regex=False)
-        if rmask.sum() >= 7:
-            base_pool = base_pool[rmask].copy()
-            region_used = True
+        region_pool = base_pool[rmask].copy()
+        candidates.append(_similar_candidate_from_pool(
+            f"지역:{region_label}", region_pool, window=5,
+            basis=f"{region_label} 지역 + 용역성격 {label}"
+        ))
 
     target_bucket = None
-    sim = base_pool
+    bucketed = pd.DataFrame()
     if "업체수" in base_pool.columns and base_pool["업체수"].notna().any():
         avg_for_bucket = base_pool["업체수"].dropna().mean()
         target_bucket = _company_bucket(avg_for_bucket)
         if target_bucket:
             blo, bhi, _ = target_bucket
             bucketed = base_pool[(base_pool["업체수"]>=blo) & (base_pool["업체수"]<=bhi)].copy()
-            if len(bucketed) >= 7:
-                sim = bucketed
+            candidates.append(_similar_candidate_from_pool(
+                f"업체수:{target_bucket[2]}", bucketed, window=5,
+                basis=f"참여업체수 {target_bucket[2]} 구간"
+            ))
 
-    if len(sim) < 7:
+    fallback = False
+    if not any(candidates):
         if is_diag(name):
             kepco_mask = work['발주기관'].astype(str).str.contains('한국전력공사',na=False,regex=False)
             diag_mask  = pd.Series([False]*len(work), index=work.index)
@@ -258,34 +304,38 @@ def analyze_similar(name, base_원, df_c, region=""):
                 diag_mask = diag_mask | work['공고명'].astype(str).str.contains(kw,na=False,regex=False)
             sim = work[kepco_mask & diag_mask].copy()
             label, kws = "진단", DIAG_KWS
+            fallback = True
+            candidates.append(_similar_candidate_from_pool("분야대체:진단", sim, window=5, basis="한전 진단 전체 표본"))
         elif is_supervision(name):
             kepco_mask = work['발주기관'].astype(str).str.contains('한국전력공사',na=False,regex=False)
             sup_mask   = work['공고명'].astype(str).str.contains('감리',na=False,regex=False)
             sim = work[kepco_mask & sup_mask].copy()
             label, kws = "감리", ["감리"]
-    sim = _sort_by_open_date(sim)
-    if len(sim) < 3: return None
+            fallback = True
+            candidates.append(_similar_candidate_from_pool("분야대체:감리", sim, window=5, basis="한전 감리 전체 표본"))
 
-    pred_info = _similar_pattern_prediction(sim, window=5, top_k=5)
-    if not pred_info: return None
-    vals = sim["예가/기초(0%)"].dropna().values
-    co = sim["업체수"].mean() if "업체수" in sim.columns else None
+    candidates = [c for c in candidates if c]
+    best = _pick_best_candidate(candidates)
+    if not best: return None
     return {
-        "pred":round(float(pred_info["pred"]),4),
-        "n":len(vals),
-        "mean":round(float(np.mean(vals)),4),
-        "std":round(float(np.std(vals)),4),
-        "avg_companies":round(float(co),1) if co is not None and not np.isnan(float(co)) else None,
+        "pred":best["pred"],
+        "n":best["n"],
+        "mean":best["mean"],
+        "std":best["std"],
+        "avg_companies":best.get("avg_companies"),
         "keywords":kws,
         "service_label":label,
-        "region_label":region_label if region_used else "",
+        "region_label":region_label if region_label else "",
         "company_bucket":target_bucket[2] if target_bucket else "",
-        "method":pred_info["method"],
-        "matched_n":pred_info["matched_n"],
-        "best_distance":round(float(pred_info["best_distance"]),4) if pred_info["best_distance"] is not None else None,
-        "next_vals":pred_info["next_vals"],
-        "fallback":len(base_pool)<7,
-        "fallback_note":"표본 부족으로 한전 분야 표본 대체" if len(base_pool)<7 else ""
+        "method":best["method"],
+        "matched_n":best["matched_n"],
+        "best_distance":best.get("best_distance"),
+        "next_vals":best.get("next_vals",[]),
+        "fallback":fallback,
+        "fallback_note":"표본 부족으로 한전 분야 표본 대체" if fallback else "",
+        "selected_label":best["label"],
+        "selected_basis":best.get("basis",""),
+        "candidates":candidates,
     }
 
 def _trend_field_filter(name):
@@ -357,16 +407,13 @@ def _nearest_trend_prediction(vals, window=10, top_k=5):
         "best_distance": float(best[0][0]),
     }
 
-def analyze_trend(org, name, df_c):
-    """③ 트렌드: 직전 10개 흐름과 가장 유사한 과거 패턴의 다음 값을 기준으로 산정."""
-    if df_c is None: return None
-    field_label, _ = _trend_field_filter(name)
-    sub = _trend_scope_df(org, name, df_c)
+def _trend_candidate_from_pool(label, sub, window=10, basis=""):
+    sub = _sort_by_open_date(sub)
     vals = sub["예가/기초(0%)"].dropna().values if "예가/기초(0%)" in sub.columns else np.array([])
     if len(vals) < 5: return None
 
-    match = _nearest_trend_prediction(vals, window=10, top_k=5)
-    rn = min(10, len(vals))
+    match = _nearest_trend_prediction(vals, window=window, top_k=5)
+    rn = min(window, len(vals))
     recent = vals[-rn:]
     older = vals[:-rn]
     rm = float(np.mean(recent))
@@ -380,7 +427,7 @@ def analyze_trend(org, name, df_c):
         hi2 = round(match["hi"], 2)
         if lo2 > hi2:
             lo2, hi2 = hi2, lo2
-        method = "직전10 유사패턴"
+        method = f"직전{window} 유사패턴"
         matched_n = len(match["matches"])
         best_distance = round(match["best_distance"], 4)
         next_vals = [round(float(v), 4) for v in match["next_vals"]]
@@ -397,6 +444,7 @@ def analyze_trend(org, name, df_c):
 
     co = sub["업체수"].tail(rn).mean() if "업체수" in sub.columns else None
     return {
+        "label":label,
         "pred":round(float(raw_pred),4),
         "recent_mean":round(rm,4),
         "drift":round(drift,4),
@@ -410,9 +458,42 @@ def analyze_trend(org, name, df_c):
         "matched_n":matched_n,
         "best_distance":best_distance,
         "next_vals":next_vals,
-        "field_label":field_label,
+        "field_label":label,
         "scope_n":len(vals),
+        "n":len(vals),
+        "std":round(float(np.std(vals)),4),
+        "basis":basis,
     }
+
+def analyze_trend(org, name, df_c, region=""):
+    """③ 트렌드: 전체/분야/지역 후보 중 유사패턴 가능성이 높은 값을 기본 추천."""
+    if df_c is None: return None
+    field_label, keywords = _trend_field_filter(name)
+    candidates = []
+    overall = df_c[df_c["발주기관"] == org].copy()
+    candidates.append(_trend_candidate_from_pool("전체", overall, window=10, basis="동일 발주처 전체 흐름"))
+
+    field_pool = _trend_scope_df(org, name, df_c)
+    candidates.append(_trend_candidate_from_pool(f"분야:{field_label}", field_pool, window=10, basis=f"{field_label} 분야 흐름"))
+
+    region_label = _region_key(region) or _region_key(name)
+    if region_label and "지역" in df_c.columns:
+        region_pool = df_c[df_c["지역"].astype(str).str.contains(region_label, na=False, regex=False)].copy()
+        if keywords:
+            rmask = pd.Series([False]*len(region_pool), index=region_pool.index)
+            for kw in keywords:
+                rmask = rmask | region_pool["공고명"].astype(str).str.contains(kw, na=False, regex=False)
+            region_pool = region_pool[rmask].copy()
+        candidates.append(_trend_candidate_from_pool(f"지역:{region_label}", region_pool, window=10, basis=f"{region_label} 지역 흐름"))
+
+    candidates = [c for c in candidates if c]
+    best = _pick_best_candidate(candidates)
+    if not best: return None
+    best = dict(best)
+    best["selected_label"] = best["label"]
+    best["selected_basis"] = best.get("basis","")
+    best["candidates"] = candidates
+    return best
 
 def recommend_range(a1,a2,a3):
     vals=[v["pred"] for v in [a1,a2,a3] if v]
@@ -428,6 +509,67 @@ def convergence_score(a1,a2,a3):
     elif sv<0.10: return sv,"★★☆ 보통"
     elif sv<0.20: return sv,"★☆☆ 낮음"
     else:         return sv,"⚠️ 분산큼"
+
+def pattern_candidates(a1):
+    if not a1:
+        return []
+    return [
+        {
+            "label":"보수값",
+            "pred":a1.get("conservative", a1["pred"]),
+            "basis":f"기준값에서 표준편차 보정. n={a1.get('n',0)} / std={a1.get('std',0):.4f}",
+        },
+        {
+            "label":"기준값(추천)",
+            "pred":a1["pred"],
+            "basis":f"최근5건 {a1.get('r5',0):+.4f}, 최근10건 {a1.get('r10',0):+.4f}, 전체평균 {a1.get('mean',0):+.4f}",
+        },
+        {
+            "label":"공격값",
+            "pred":a1.get("aggressive", a1["pred"]),
+            "basis":f"기준값에 표준편차 보정. 패턴={a1.get('pattern','-')} / 추세={a1.get('trend','-')}",
+        },
+    ]
+
+def _option_text(opt):
+    dist = opt.get("best_distance")
+    dist_txt = f" | MAE {dist:.4f}" if dist is not None else ""
+    n_txt = f" | n={opt.get('n')}" if opt.get("n") is not None else ""
+    return f"{opt.get('label','후보')} {opt.get('pred',0):+.4f}%{n_txt}{dist_txt}"
+
+def select_candidate_ui(title, candidates, key, default_label=None):
+    candidates = [c for c in candidates if c]
+    if not candidates:
+        st.caption("선택 가능한 후보가 없습니다.")
+        return None
+    default_idx = 0
+    if default_label:
+        for i,opt in enumerate(candidates):
+            if opt.get("label") == default_label:
+                default_idx = i
+                break
+    idx = st.radio(
+        title,
+        options=list(range(len(candidates))),
+        index=default_idx,
+        format_func=lambda i: _option_text(candidates[i]),
+        key=key,
+    )
+    opt = candidates[idx]
+    st.caption(f"근거: {opt.get('basis','-')}")
+    return opt
+
+def selected_analysis(base, opt):
+    if not base or not opt:
+        return base
+    out = dict(base)
+    out["pred"] = round(float(opt["pred"]), 4)
+    out["selected_label"] = opt.get("label","선택값")
+    out["selected_basis"] = opt.get("basis","")
+    for k in ["best_distance","matched_n","next_vals","n","mean","std","avg_companies","method"]:
+        if k in opt:
+            out[k] = opt[k]
+    return out
 
 def parse_xls(file_bytes, filename=""):
     """입찰서류함 파일 파싱 — xls/xlsx 모두 지원"""
@@ -822,7 +964,7 @@ def make_excel(results):
     wb=Workbook(); ws=wb.active; ws.title="투찰전략"; ws.sheet_view.showGridLines=False
     today=datetime.now().strftime("%Y.%m.%d")
     ws.merge_cells("A1:L1"); t=ws["A1"]
-    t.value=f"투찰전략 분석표 — {today}  ★ 패턴/유사표본/트렌드 종합"
+    t.value=f"투찰전략 분석표 — {today}  ★ 선택값 기준"
     t.font=Font(name="맑은 고딕",bold=True,size=13,color="FF1a2744")
     t.fill=PatternFill("solid",start_color="FFe0e7ff")
     t.alignment=Alignment(horizontal="center",vertical="center")
@@ -837,8 +979,12 @@ def make_excel(results):
 
     for i,row in enumerate(results):
         r=i+3; bg=GRAY if r%2==0 else "FFFFFFFF"
-        b=row["bid"]; a1=row["a1"]; a2=row["a2"]; a3=row["a3"]
-        lo,hi=row["range_lo"],row["range_hi"]
+        b=row["bid"]
+        a1=row.get("a1_selected") or row["a1"]
+        a2=row.get("a2_selected") or row["a2"]
+        a3=row.get("a3_selected") or row["a3"]
+        lo=row.get("range_lo_selected", row["range_lo"])
+        hi=row.get("range_hi_selected", row["range_hi"])
         C(ws,r,1,b["no"],bg=bg,bold=True,center=True)
         C(ws,r,2,b["name"][:48],bg=bg,sz=9,wrap=True)
         C(ws,r,3,b["org"],bg=bg,sz=9)
@@ -873,7 +1019,7 @@ def make_excel(results):
     st.markdown("""
 <div class="main-header">
 <h2>📊 투찰전략 분석 시스템</h2>
-<p style="margin:0;opacity:0.8">패턴 범위 비교 + 유사표본 + 최근 트렌드 | v2.3 | 낙찰이력 기반</p>
+<p style="margin:0;opacity:0.8">자동추천 + 입찰자 선택형 전략표 | v2.4 | 낙찰이력 기반</p>
 </div>""", unsafe_allow_html=True)
 
 with st.sidebar:
@@ -980,7 +1126,7 @@ else:
     for i,b in enumerate(bids):
         a1=analyze_pattern(b["org"],df_c,pattern_stats)
         a2=analyze_similar(b["name"],b["base"],df_c,b.get("region",""))
-        a3=analyze_trend(b["org"],b["name"],df_c)
+        a3=analyze_trend(b["org"],b["name"],df_c,b.get("region",""))
         lo,hi=recommend_range(a1,a2,a3)
         conv_std,conv_lbl=convergence_score(a1,a2,a3)
         amt_lbl,amt_adj,amt_note=get_amt_info(b["base_억"])
@@ -992,7 +1138,7 @@ else:
     prog.empty()
 
     # ── 요약 테이블 ──────────────────────────────────────────
-    st.subheader(f"📋 투찰전략 — {datetime.now().strftime('%Y.%m.%d')} ({len(bids)}건)")
+    st.subheader(f"📋 자동추천 요약 — {datetime.now().strftime('%Y.%m.%d')} ({len(bids)}건)")
     rows=[]
     for row in results:
         b=row["bid"]; a1=row["a1"]; a2=row["a2"]; a3=row["a3"]
@@ -1019,7 +1165,7 @@ else:
 
     # ── 건별 상세 ────────────────────────────────────────────
     st.subheader("📌 건별 상세 + 사정율 흐름 차트")
-    for row in results:
+    for detail_i,row in enumerate(results):
         b=row["bid"]; a1=row["a1"]; a2=row["a2"]; a3=row["a3"]
         lo,hi=row["range_lo"],row["range_hi"]
         grade=a1.get("grade","?") if a1 else "?"
@@ -1049,6 +1195,7 @@ else:
                     st.caption(f"r5={a1['r5']:+.4f} / r10={a1['r10']:+.4f} / 직전:{a1['last_val']:+.4f}%")
                     if a1.get("std",0) > 0.3:
                         st.caption(f"⚠️ std={a1['std']:.3f}% — 실제분포 넓음")
+                pat_opt = select_candidate_ui("① 선택", pattern_candidates(a1), f"pat_{b['no']}_{detail_i}", "기준값(추천)")
             with c2:
                 v=f"{a2['pred']:+.4f}%" if a2 else "이력없음"
                 fb = a2.get("fallback",False) if a2 else False
@@ -1062,6 +1209,7 @@ else:
                     if a2.get("best_distance") is not None:
                         st.caption(f"최소거리 MAE:{a2['best_distance']:.4f} | 유사패턴 {a2.get('matched_n',0)}개 | 다음값 후보:{a2.get('next_vals',[])}")
                     if a2.get("avg_companies"): st.caption(f"업체수 참고:{a2['avg_companies']}개")
+                sim_opt = select_candidate_ui("② 선택", a2.get("candidates",[]) if a2 else [], f"sim_{b['no']}_{detail_i}", a2.get("selected_label") if a2 else None)
             with c3:
                 v=f"{a3['pred']:+.4f}%" if a3 else "이력없음"
                 st.markdown(f'<div class="val-box val-trend">③트렌드<br>{v}</div>',unsafe_allow_html=True)
@@ -1071,13 +1219,29 @@ else:
                     st.caption(f"다음 권장구간: {a3.get('trend_range','-')} | 유사패턴 {a3.get('matched_n',0)}개")
                     if a3.get("best_distance") is not None:
                         st.caption(f"최소거리 MAE:{a3['best_distance']:.4f} | 다음값 후보:{a3.get('next_vals',[])}")
+                trend_opt = select_candidate_ui("③ 선택", a3.get("candidates",[]) if a3 else [], f"trend_{b['no']}_{detail_i}", a3.get("selected_label") if a3 else None)
+            sel_a1 = selected_analysis(a1, pat_opt)
+            sel_a2 = selected_analysis(a2, sim_opt)
+            sel_a3 = selected_analysis(a3, trend_opt)
+            lo_sel, hi_sel = recommend_range(sel_a1, sel_a2, sel_a3)
+            conv_std_sel, conv_lbl_sel = convergence_score(sel_a1, sel_a2, sel_a3)
+            row["a1_selected"] = sel_a1
+            row["a2_selected"] = sel_a2
+            row["a3_selected"] = sel_a3
+            row["range_lo_selected"] = lo_sel
+            row["range_hi_selected"] = hi_sel
+            row["conv_std_selected"] = conv_std_sel
+            row["conv_lbl_selected"] = conv_lbl_sel
             with c4:
-                if lo is not None:
-                    st.markdown(f'<div class="val-box val-rec">💡권장구간<br>{lo:+.4f}%~{hi:+.4f}%</div>',unsafe_allow_html=True)
+                if lo_sel is not None:
+                    st.markdown(f'<div class="val-box val-rec">💡선택값 전략<br>{lo_sel:+.4f}%~{hi_sel:+.4f}%</div>',unsafe_allow_html=True)
                     if b["base"]>0:
-                        st.caption(f"하한: {int(b['base']*(100+lo)/100):,}원")
-                        st.caption(f"상한: {int(b['base']*(100+hi)/100):,}원")
-                    st.caption(f"수렴도: {row['conv_lbl']}")
+                        st.caption(f"하한: {int(b['base']*(100+lo_sel)/100):,}원")
+                        st.caption(f"상한: {int(b['base']*(100+hi_sel)/100):,}원")
+                    st.caption(f"수렴도: {conv_lbl_sel}")
+                    st.caption(f"① {sel_a1.get('selected_label','-') if sel_a1 else '-'}")
+                    st.caption(f"② {sel_a2.get('selected_label','-') if sel_a2 else '-'}")
+                    st.caption(f"③ {sel_a3.get('selected_label','-') if sel_a3 else '-'}")
                 else:
                     st.markdown('<div class="val-box" style="background:#fee2e2;color:#991b1b">⚠️ 데이터부족</div>',unsafe_allow_html=True)
 
@@ -1085,7 +1249,7 @@ else:
             if a1 and (a1.get("all_vals") or a1.get("recent10")):
                 st.markdown("---")
                 with st.spinner("차트 생성 중..."):
-                    chart_buf=make_flow_chart(a1,a2,a3,lo,hi,b["org"])
+                    chart_buf=make_flow_chart(sel_a1,sel_a2,sel_a3,lo_sel,hi_sel,b["org"])
                 if chart_buf: st.image(chart_buf,use_container_width=True)
             else:
                 st.caption("⚠️ 이력 데이터 부족")
@@ -1102,16 +1266,42 @@ else:
                             st.metric(scope["scope"], f"{scope['pred']:+.4f}%", f"n={scope['n']}건")
                             st.caption(f"평균 {scope['mean']:+.4f}% / 표준편차 {scope['std']:.4f}%")
                     with st.spinner("패턴 범위 비교차트..."):
-                        scope_buf = make_pattern_scope_chart(scopes, lo, hi, f"Pattern Scope — {tr_org(b['org'])}")
+                        scope_buf = make_pattern_scope_chart(scopes, lo_sel, hi_sel, f"Pattern Scope — {tr_org(b['org'])}")
                     if scope_buf: st.image(scope_buf, use_container_width=True)
                 else:
                     st.caption("패턴 범위 비교를 위한 표본이 부족합니다.")
 
     st.divider()
+    st.subheader("✅ 최종 선택값 기준 투찰전략표")
+    final_rows=[]
+    for row in results:
+        b=row["bid"]
+        s1=row.get("a1_selected") or row["a1"]
+        s2=row.get("a2_selected") or row["a2"]
+        s3=row.get("a3_selected") or row["a3"]
+        lo=row.get("range_lo_selected", row["range_lo"])
+        hi=row.get("range_hi_selected", row["range_hi"])
+        conv=row.get("conv_lbl_selected", row["conv_lbl"])
+        final_rows.append({
+            "No":b["no"],
+            "공고명":b["name"][:36]+"…" if len(b["name"])>36 else b["name"],
+            "①선택":s1.get("selected_label","-") if s1 else "-",
+            "①값":f"{s1['pred']:+.4f}%" if s1 else "-",
+            "②선택":s2.get("selected_label","-") if s2 else "-",
+            "②값":f"{s2['pred']:+.4f}%" if s2 else "-",
+            "③선택":s3.get("selected_label","-") if s3 else "-",
+            "③값":f"{s3['pred']:+.4f}%" if s3 else "-",
+            "권장하한":f"{lo:+.4f}%" if lo is not None else "-",
+            "권장상한":f"{hi:+.4f}%" if hi is not None else "-",
+            "수렴도":conv,
+        })
+    st.dataframe(pd.DataFrame(final_rows),use_container_width=True,hide_index=True)
+
+    st.divider()
     st.subheader("💾 전략표 다운로드")
     excel_buf=make_excel(results)
     today_str=datetime.now().strftime("%Y%m%d")
-    st.download_button("📥 엑셀 다운로드 (패턴 분석)",
+    st.download_button("📥 엑셀 다운로드 (선택값 기준)",
         data=excel_buf,
         file_name=f"투찰전략_{today_str}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
